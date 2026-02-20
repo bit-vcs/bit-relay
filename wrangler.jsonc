@@ -1,0 +1,22 @@
+{
+  "$schema": "https://raw.githubusercontent.com/cloudflare/workers-sdk/main/packages/wrangler/config-schema.json",
+  "name": "bit-relay",
+  "main": "src/cloudflare_worker.ts",
+  "compatibility_date": "2026-02-20",
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "RELAY_ROOM",
+        "class_name": "RelayRoom"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_classes": [
+        "RelayRoom"
+      ]
+    }
+  ]
+}
