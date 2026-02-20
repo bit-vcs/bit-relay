@@ -1,7 +1,17 @@
+import {
+  buildPublishSigningMessage,
+  buildRotateSigningMessage,
+  canonicalizeJson,
+  isLikelyBase64Url,
+  sha256Hex,
+  verifyEd25519Signature,
+} from './signing.ts';
+
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 
 type JsonObject = { [key: string]: JsonValue };
+type KeyStatus = 'active' | 'revoked';
 
 export interface Envelope {
   room: string;
@@ -22,12 +32,27 @@ interface PublishResult {
 interface AckResult {
   status: number;
   body: JsonObject;
-  changed: boolean;
 }
 
 interface RateCounter {
   count: number;
   windowStart: number;
+}
+
+interface KeyRecord {
+  publicKey: string;
+  status: KeyStatus;
+  firstSeenAt: number;
+  lastSeenAt: number;
+  rotatedAt: number | null;
+  revokedAt: number | null;
+}
+
+interface PublishAuthHeaders {
+  publicKey: string;
+  signature: string;
+  timestampSec: number;
+  nonce: string;
 }
 
 interface RoomState {
@@ -41,8 +66,19 @@ interface SnapshotRoom {
   acks_by_consumer: Record<string, string[]>;
 }
 
+interface SnapshotKeyRecord {
+  public_key: string;
+  status: KeyStatus;
+  first_seen_at: number;
+  last_seen_at: number;
+  rotated_at: number | null;
+  revoked_at: number | null;
+}
+
 export interface RelaySnapshot {
   rooms: Record<string, SnapshotRoom>;
+  keys_by_sender: Record<string, SnapshotKeyRecord>;
+  nonces_by_sender: Record<string, Record<string, number>>;
 }
 
 export interface MemoryRelayOptions {
@@ -53,6 +89,10 @@ export interface MemoryRelayOptions {
   publishWindowMs?: number;
   roomTokens?: Record<string, string>;
   maxWsSessions?: number;
+  requireSignatures?: boolean;
+  maxClockSkewSec?: number;
+  nonceTtlSec?: number;
+  maxNoncesPerSender?: number;
 }
 
 export interface MemoryRelayService {
@@ -67,6 +107,10 @@ const DEFAULT_PUBLISH_PAYLOAD_MAX_BYTES = 64 * 1024;
 const DEFAULT_PUBLISH_LIMIT_PER_WINDOW = 30;
 const DEFAULT_PUBLISH_WINDOW_MS = 60_000;
 const DEFAULT_MAX_WS_SESSIONS = 100;
+const DEFAULT_REQUIRE_SIGNATURES = true;
+const DEFAULT_MAX_CLOCK_SKEW_SEC = 300;
+const DEFAULT_NONCE_TTL_SEC = 600;
+const DEFAULT_MAX_NONCES_PER_SENDER = 2048;
 const ROOM_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const WS_OPEN_STATE = 1;
 
@@ -195,8 +239,8 @@ function normalizePublishPayload(parsed: JsonValue): JsonValue {
   if (!isJsonValue(payload)) {
     return parsed;
   }
+  const keys = Object.keys(asObject).filter((key) => key !== 'auth');
   const hasKind = typeof asObject.kind === 'string';
-  const keys = Object.keys(asObject);
   if (!hasKind || (keys.length === 1 && keys[0] === 'payload')) {
     return payload;
   }
@@ -204,14 +248,13 @@ function normalizePublishPayload(parsed: JsonValue): JsonValue {
 }
 
 function sanitizeEnvelope(envelope: Envelope): JsonObject {
-  const out: JsonObject = {
+  return {
     room: envelope.room,
     id: envelope.id,
     sender: envelope.sender,
     topic: envelope.topic,
     payload: envelope.payload,
   };
-  return out;
 }
 
 function parseAckIds(
@@ -252,6 +295,53 @@ function parseAckIds(
     return { ok: false, error: 'missing field: ids' };
   }
   return { ok: true, ids };
+}
+
+function parsePublishAuthHeaders(
+  request: Request,
+): { ok: true; auth: PublishAuthHeaders | null } | { ok: false; status: number; error: string } {
+  const publicKey = (request.headers.get('x-relay-public-key') ?? '').trim();
+  const signature = (request.headers.get('x-relay-signature') ?? '').trim();
+  const timestampRaw = (request.headers.get('x-relay-timestamp') ?? '').trim();
+  const nonce = (request.headers.get('x-relay-nonce') ?? '').trim();
+
+  const hasAny = publicKey.length > 0 || signature.length > 0 || timestampRaw.length > 0 ||
+    nonce.length > 0;
+  if (!hasAny) {
+    return { ok: true, auth: null };
+  }
+
+  if (
+    publicKey.length === 0 ||
+    signature.length === 0 ||
+    timestampRaw.length === 0 ||
+    nonce.length === 0
+  ) {
+    return { ok: false, status: 400, error: 'incomplete signature headers' };
+  }
+
+  if (!isLikelyBase64Url(publicKey) || !isLikelyBase64Url(signature)) {
+    return { ok: false, status: 400, error: 'invalid signature headers' };
+  }
+
+  const timestampSec = Number.parseInt(timestampRaw, 10);
+  if (!Number.isFinite(timestampSec) || timestampSec <= 0) {
+    return { ok: false, status: 400, error: 'invalid signature timestamp' };
+  }
+
+  if (nonce.length > 256) {
+    return { ok: false, status: 400, error: 'invalid nonce' };
+  }
+
+  return {
+    ok: true,
+    auth: {
+      publicKey,
+      signature,
+      timestampSec,
+      nonce,
+    },
+  };
 }
 
 function fallbackRateLimit(
@@ -383,7 +473,6 @@ function ackIntoRoom(
     return {
       status: 400,
       body: { ok: false, error: parsed.error },
-      changed: false,
     };
   }
 
@@ -410,7 +499,6 @@ function ackIntoRoom(
       acked_total: ackSet.size,
       requested_count: parsed.ids.length,
     },
-    changed: newlyAcked > 0,
   };
 }
 
@@ -459,6 +547,15 @@ function broadcastPublish(
   }
 }
 
+function nowEpochSec(): number {
+  return Math.floor(Date.now() / 1000);
+}
+
+function parseBoolOrDefault(raw: boolean | undefined, fallback: boolean): boolean {
+  if (typeof raw !== 'boolean') return fallback;
+  return raw;
+}
+
 export function createMemoryRelayService(options: MemoryRelayOptions = {}): MemoryRelayService {
   const authToken = normalizeAuthToken(options.authToken);
   const roomTokens = parseRoomTokens(options.roomTokens);
@@ -479,9 +576,142 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
     Math.trunc(options.publishWindowMs ?? DEFAULT_PUBLISH_WINDOW_MS),
   );
   const maxWsSessions = Math.max(1, Math.trunc(options.maxWsSessions ?? DEFAULT_MAX_WS_SESSIONS));
+  const requireSignatures = parseBoolOrDefault(
+    options.requireSignatures,
+    DEFAULT_REQUIRE_SIGNATURES,
+  );
+  const maxClockSkewSec = Math.max(
+    1,
+    Math.trunc(options.maxClockSkewSec ?? DEFAULT_MAX_CLOCK_SKEW_SEC),
+  );
+  const nonceTtlSec = Math.max(1, Math.trunc(options.nonceTtlSec ?? DEFAULT_NONCE_TTL_SEC));
+  const maxNoncesPerSender = Math.max(
+    1,
+    Math.trunc(options.maxNoncesPerSender ?? DEFAULT_MAX_NONCES_PER_SENDER),
+  );
 
   const rooms = new Map<string, RoomState>();
   const senderRateCounts = new Map<string, RateCounter>();
+  const keyRegistry = new Map<string, KeyRecord>();
+  const noncesBySender = new Map<string, Map<string, number>>();
+
+  function pruneSenderNonces(sender: string, nowSec: number): Map<string, number> {
+    const map = noncesBySender.get(sender) ?? new Map<string, number>();
+    if (!noncesBySender.has(sender)) {
+      noncesBySender.set(sender, map);
+    }
+    for (const [nonce, ts] of map.entries()) {
+      if (nowSec - ts > nonceTtlSec) {
+        map.delete(nonce);
+      }
+    }
+    while (map.size > maxNoncesPerSender) {
+      const first = map.keys().next();
+      if (first.done) break;
+      map.delete(first.value);
+    }
+    return map;
+  }
+
+  function isReplayNonce(sender: string, nonce: string, nowSec: number): boolean {
+    const map = pruneSenderNonces(sender, nowSec);
+    return map.has(nonce);
+  }
+
+  function rememberNonce(sender: string, nonce: string, ts: number, nowSec: number): void {
+    const map = pruneSenderNonces(sender, nowSec);
+    map.set(nonce, ts);
+    while (map.size > maxNoncesPerSender) {
+      const first = map.keys().next();
+      if (first.done) break;
+      map.delete(first.value);
+    }
+  }
+
+  function ensureTofuKey(sender: string, publicKey: string, nowSec: number): Response | null {
+    const record = keyRegistry.get(sender);
+    if (!record) {
+      keyRegistry.set(sender, {
+        publicKey,
+        status: 'active',
+        firstSeenAt: nowSec,
+        lastSeenAt: nowSec,
+        rotatedAt: null,
+        revokedAt: null,
+      });
+      return null;
+    }
+
+    if (record.status !== 'active') {
+      return toErrorResponse('sender key revoked', 403);
+    }
+
+    if (!timingSafeEqual(record.publicKey, publicKey)) {
+      return toErrorResponse('sender key mismatch', 409);
+    }
+
+    record.lastSeenAt = nowSec;
+    return null;
+  }
+
+  async function handleSignatureVerification(args: {
+    request: Request;
+    sender: string;
+    room: string;
+    id: string;
+    topic: string;
+    payload: JsonValue;
+  }): Promise<Response | { signature: string | null }> {
+    const authParsed = parsePublishAuthHeaders(args.request);
+    if (!authParsed.ok) {
+      return toErrorResponse(authParsed.error, authParsed.status);
+    }
+
+    if (!authParsed.auth) {
+      if (requireSignatures) {
+        return toErrorResponse('missing signature headers', 401);
+      }
+      return { signature: null };
+    }
+
+    const auth = authParsed.auth;
+    const nowSec = nowEpochSec();
+    if (Math.abs(nowSec - auth.timestampSec) > maxClockSkewSec) {
+      return toErrorResponse('stale signature timestamp', 401);
+    }
+
+    if (isReplayNonce(args.sender, auth.nonce, nowSec)) {
+      return toErrorResponse('replayed nonce', 409);
+    }
+
+    const payloadHash = await sha256Hex(canonicalizeJson(args.payload));
+    const signingMessage = buildPublishSigningMessage({
+      sender: args.sender,
+      room: args.room,
+      id: args.id,
+      topic: args.topic,
+      ts: auth.timestampSec,
+      nonce: auth.nonce,
+      payloadHash,
+    });
+
+    const verified = await verifyEd25519Signature(
+      auth.publicKey,
+      signingMessage,
+      auth.signature,
+    );
+    if (!verified) {
+      return toErrorResponse('invalid signature', 401);
+    }
+
+    const tofuError = ensureTofuKey(args.sender, auth.publicKey, nowSec);
+    if (tofuError) {
+      return tofuError;
+    }
+
+    rememberNonce(args.sender, auth.nonce, auth.timestampSec, nowSec);
+    return { signature: auth.signature };
+  }
 
   function handleWebSocket(request: Request, room: string): Response {
     const roomState = getOrCreateRoomState(rooms, room);
@@ -503,8 +733,7 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
     }
 
     const maybePairCtor =
-      (globalThis as { WebSocketPair?: new () => { 0: WebSocket; 1: WebSocket } })
-        .WebSocketPair;
+      (globalThis as { WebSocketPair?: new () => { 0: WebSocket; 1: WebSocket } }).WebSocketPair;
     if (typeof maybePairCtor === 'function') {
       const pair = new maybePairCtor();
       const client = pair[0];
@@ -517,7 +746,10 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
       );
     }
 
-    const maybeDeno = (globalThis as { Deno?: typeof Deno }).Deno;
+    type DenoLike = {
+      upgradeWebSocket: (request: Request) => { response: Response; socket: WebSocket };
+    };
+    const maybeDeno = (globalThis as { Deno?: DenoLike }).Deno;
     if (maybeDeno && typeof maybeDeno.upgradeWebSocket === 'function') {
       const { response, socket } = maybeDeno.upgradeWebSocket(request);
       subscribeSocket(roomState, socket);
@@ -525,6 +757,129 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
     }
 
     return toErrorResponse('websocket unsupported in this runtime', 501);
+  }
+
+  function handleKeyInfo(request: Request): Response {
+    if (request.method !== 'GET') {
+      return methodNotAllowedResponse();
+    }
+    const sender = (new URL(request.url).searchParams.get('sender') ?? '').trim();
+    if (sender.length === 0) {
+      return toErrorResponse('missing query: sender', 400);
+    }
+    const record = keyRegistry.get(sender);
+    if (!record) {
+      return toErrorResponse('sender key not found', 404);
+    }
+    return Response.json(
+      {
+        ok: true,
+        sender,
+        key: {
+          public_key: record.publicKey,
+          status: record.status,
+          first_seen_at: record.firstSeenAt,
+          last_seen_at: record.lastSeenAt,
+          rotated_at: record.rotatedAt,
+          revoked_at: record.revokedAt,
+        },
+      },
+      { status: 200 },
+    );
+  }
+
+  async function handleKeyRotate(request: Request): Promise<Response> {
+    if (request.method !== 'POST') {
+      return methodNotAllowedResponse();
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(await request.text());
+    } catch {
+      return toErrorResponse('invalid json payload', 400);
+    }
+    if (!isObjectRecord(parsed)) {
+      return toErrorResponse('invalid json payload', 400);
+    }
+
+    const sender = (typeof parsed.sender === 'string' ? parsed.sender : '').trim();
+    const newPublicKey = (typeof parsed.new_public_key === 'string' ? parsed.new_public_key : '')
+      .trim();
+    const ts = typeof parsed.ts === 'number'
+      ? Math.trunc(parsed.ts)
+      : typeof parsed.ts === 'string'
+      ? Number.parseInt(parsed.ts, 10)
+      : Number.NaN;
+    const nonce = (typeof parsed.nonce === 'string' ? parsed.nonce : '').trim();
+    const oldSignature = (typeof parsed.old_signature === 'string' ? parsed.old_signature : '')
+      .trim();
+    const newSignature = (typeof parsed.new_signature === 'string' ? parsed.new_signature : '')
+      .trim();
+
+    if (sender.length === 0) {
+      return toErrorResponse('missing field: sender', 400);
+    }
+    if (newPublicKey.length === 0 || !isLikelyBase64Url(newPublicKey)) {
+      return toErrorResponse('invalid field: new_public_key', 400);
+    }
+    if (!Number.isFinite(ts) || ts <= 0) {
+      return toErrorResponse('invalid field: ts', 400);
+    }
+    if (nonce.length === 0 || nonce.length > 256) {
+      return toErrorResponse('invalid field: nonce', 400);
+    }
+    if (
+      oldSignature.length === 0 ||
+      newSignature.length === 0 ||
+      !isLikelyBase64Url(oldSignature) ||
+      !isLikelyBase64Url(newSignature)
+    ) {
+      return toErrorResponse('invalid signature payload', 400);
+    }
+
+    const nowSec = nowEpochSec();
+    if (Math.abs(nowSec - ts) > maxClockSkewSec) {
+      return toErrorResponse('stale signature timestamp', 401);
+    }
+    if (isReplayNonce(sender, nonce, nowSec)) {
+      return toErrorResponse('replayed nonce', 409);
+    }
+
+    const record = keyRegistry.get(sender);
+    if (!record) {
+      return toErrorResponse('sender key not found', 404);
+    }
+    if (record.status !== 'active') {
+      return toErrorResponse('sender key revoked', 403);
+    }
+
+    const message = buildRotateSigningMessage({ sender, newPublicKey, ts, nonce });
+    const [verifiedOld, verifiedNew] = await Promise.all([
+      verifyEd25519Signature(record.publicKey, message, oldSignature),
+      verifyEd25519Signature(newPublicKey, message, newSignature),
+    ]);
+    if (!verifiedOld) {
+      return toErrorResponse('invalid old signature', 401);
+    }
+    if (!verifiedNew) {
+      return toErrorResponse('invalid new signature', 401);
+    }
+
+    record.publicKey = newPublicKey;
+    record.rotatedAt = nowSec;
+    record.lastSeenAt = nowSec;
+    rememberNonce(sender, nonce, ts, nowSec);
+
+    return Response.json(
+      {
+        ok: true,
+        sender,
+        public_key: newPublicKey,
+        rotated_at: nowSec,
+      },
+      { status: 200 },
+    );
   }
 
   async function fetch(request: Request): Promise<Response> {
@@ -543,6 +898,13 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
       if (presented.length === 0 || !timingSafeEqual(presented, authToken)) {
         return unauthorizedResponse();
       }
+    }
+
+    if (pathname === '/api/v1/key/info') {
+      return handleKeyInfo(request);
+    }
+    if (pathname === '/api/v1/key/rotate') {
+      return handleKeyRotate(request);
     }
 
     if (pathname === '/ws') {
@@ -569,7 +931,7 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
       }
       const topic = (url.searchParams.get('topic') ?? 'notify').trim() || 'notify';
       const id = (url.searchParams.get('id') ?? crypto.randomUUID()).trim() || crypto.randomUUID();
-      const signature = (url.searchParams.get('sig') ?? '').trim();
+      const signatureFromQuery = (url.searchParams.get('sig') ?? '').trim();
 
       const now = Date.now();
       const rate = fallbackRateLimit(
@@ -605,6 +967,18 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
       }
 
       const payload = normalizePublishPayload(parsed);
+      const verifyResult = await handleSignatureVerification({
+        request,
+        sender,
+        room,
+        id,
+        topic,
+        payload,
+      });
+      if (verifyResult instanceof Response) {
+        return verifyResult;
+      }
+
       const roomState = getOrCreateRoomState(rooms, room);
       const result = publishIntoRoom(
         roomState,
@@ -612,7 +986,7 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
         sender,
         topic,
         id,
-        signature,
+        verifyResult.signature ?? signatureFromQuery,
         payload,
         maxMessagesPerRoom,
       );
@@ -693,66 +1067,133 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
         acks_by_consumer: acks,
       };
     }
-    return { rooms: snapshotRooms };
+
+    const keysBySender: Record<string, SnapshotKeyRecord> = {};
+    for (const [sender, key] of keyRegistry.entries()) {
+      keysBySender[sender] = {
+        public_key: key.publicKey,
+        status: key.status,
+        first_seen_at: key.firstSeenAt,
+        last_seen_at: key.lastSeenAt,
+        rotated_at: key.rotatedAt,
+        revoked_at: key.revokedAt,
+      };
+    }
+
+    const noncesSnapshot: Record<string, Record<string, number>> = {};
+    for (const [sender, nonces] of noncesBySender.entries()) {
+      const senderNonces: Record<string, number> = {};
+      for (const [nonce, ts] of nonces.entries()) {
+        senderNonces[nonce] = ts;
+      }
+      noncesSnapshot[sender] = senderNonces;
+    }
+
+    return {
+      rooms: snapshotRooms,
+      keys_by_sender: keysBySender,
+      nonces_by_sender: noncesSnapshot,
+    };
   }
 
   function restore(snapshotData: RelaySnapshot): void {
     rooms.clear();
+    keyRegistry.clear();
+    noncesBySender.clear();
 
-    if (!isObjectRecord(snapshotData) || !isObjectRecord(snapshotData.rooms)) {
+    if (!isObjectRecord(snapshotData)) {
       return;
     }
 
-    for (const [room, value] of Object.entries(snapshotData.rooms)) {
-      if (!isValidRoomName(room)) continue;
-      if (!isObjectRecord(value)) continue;
-      if (!Array.isArray(value.messages)) continue;
-      if (!isObjectRecord(value.acks_by_consumer)) continue;
+    if (isObjectRecord(snapshotData.rooms)) {
+      for (const [room, value] of Object.entries(snapshotData.rooms)) {
+        if (!isValidRoomName(room)) continue;
+        if (!isObjectRecord(value)) continue;
+        if (!Array.isArray(value.messages)) continue;
+        if (!isObjectRecord(value.acks_by_consumer)) continue;
 
-      const roomState = createRoomState();
-      roomState.messages = [];
-      for (const message of value.messages) {
-        if (!isObjectRecord(message)) continue;
-        const candidate: Envelope = {
-          room: typeof message.room === 'string' ? message.room : room,
-          id: typeof message.id === 'string' ? message.id : '',
-          sender: typeof message.sender === 'string' ? message.sender : '',
-          topic: typeof message.topic === 'string' ? message.topic : '',
-          payload: isJsonValue(message.payload) ? message.payload : null,
-          signature: typeof message.signature === 'string'
-            ? message.signature
-            : message.signature === null
-            ? null
-            : null,
-        };
-        if (
-          candidate.id.length === 0 ||
-          candidate.sender.length === 0 ||
-          candidate.topic.length === 0
-        ) {
-          continue;
+        const roomState = createRoomState();
+        roomState.messages = [];
+        for (const message of value.messages) {
+          if (!isObjectRecord(message)) continue;
+          const candidate: Envelope = {
+            room: typeof message.room === 'string' ? message.room : room,
+            id: typeof message.id === 'string' ? message.id : '',
+            sender: typeof message.sender === 'string' ? message.sender : '',
+            topic: typeof message.topic === 'string' ? message.topic : '',
+            payload: isJsonValue(message.payload) ? message.payload : null,
+            signature: typeof message.signature === 'string'
+              ? message.signature
+              : message.signature === null
+              ? null
+              : null,
+          };
+          if (
+            candidate.id.length === 0 ||
+            candidate.sender.length === 0 ||
+            candidate.topic.length === 0
+          ) {
+            continue;
+          }
+          roomState.messages.push(candidate);
         }
-        roomState.messages.push(candidate);
-      }
 
-      for (const [consumer, ids] of Object.entries(value.acks_by_consumer)) {
-        if (!Array.isArray(ids)) continue;
-        const set = new Set<string>();
-        for (const id of ids) {
-          if (typeof id !== 'string') continue;
-          const trimmed = id.trim();
-          if (trimmed.length === 0) continue;
-          set.add(trimmed);
+        for (const [consumer, ids] of Object.entries(value.acks_by_consumer)) {
+          if (!Array.isArray(ids)) continue;
+          const set = new Set<string>();
+          for (const id of ids) {
+            if (typeof id !== 'string') continue;
+            const trimmed = id.trim();
+            if (trimmed.length === 0) continue;
+            set.add(trimmed);
+          }
+          roomState.acksByConsumer.set(consumer, set);
         }
-        roomState.acksByConsumer.set(consumer, set);
-      }
 
-      if (roomState.messages.length > maxMessagesPerRoom) {
-        roomState.messages = roomState.messages.slice(
-          roomState.messages.length - maxMessagesPerRoom,
-        );
+        if (roomState.messages.length > maxMessagesPerRoom) {
+          roomState.messages = roomState.messages.slice(
+            roomState.messages.length - maxMessagesPerRoom,
+          );
+        }
+        rooms.set(room, roomState);
       }
-      rooms.set(room, roomState);
+    }
+
+    if (isObjectRecord(snapshotData.keys_by_sender)) {
+      for (const [sender, value] of Object.entries(snapshotData.keys_by_sender)) {
+        if (!isObjectRecord(value)) continue;
+        const publicKey = (typeof value.public_key === 'string' ? value.public_key : '').trim();
+        if (sender.trim().length === 0 || publicKey.length === 0) continue;
+        const status: KeyStatus = value.status === 'revoked' ? 'revoked' : 'active';
+        keyRegistry.set(sender, {
+          publicKey,
+          status,
+          firstSeenAt: typeof value.first_seen_at === 'number'
+            ? Math.trunc(value.first_seen_at)
+            : 0,
+          lastSeenAt: typeof value.last_seen_at === 'number' ? Math.trunc(value.last_seen_at) : 0,
+          rotatedAt: typeof value.rotated_at === 'number' ? Math.trunc(value.rotated_at) : null,
+          revokedAt: typeof value.revoked_at === 'number' ? Math.trunc(value.revoked_at) : null,
+        });
+      }
+    }
+
+    if (isObjectRecord(snapshotData.nonces_by_sender)) {
+      const nowSec = nowEpochSec();
+      for (const [sender, value] of Object.entries(snapshotData.nonces_by_sender)) {
+        if (!isObjectRecord(value)) continue;
+        const map = new Map<string, number>();
+        for (const [nonce, tsRaw] of Object.entries(value)) {
+          if (nonce.trim().length === 0) continue;
+          if (typeof tsRaw !== 'number' || !Number.isFinite(tsRaw)) continue;
+          const ts = Math.trunc(tsRaw);
+          if (nowSec - ts > nonceTtlSec) continue;
+          map.set(nonce, ts);
+        }
+        if (map.size > 0) {
+          noncesBySender.set(sender, map);
+        }
+      }
     }
   }
 
@@ -771,11 +1212,15 @@ export function createMemoryRelayHandler(
 }
 
 export {
+  DEFAULT_MAX_CLOCK_SKEW_SEC,
   DEFAULT_MAX_MESSAGES_PER_ROOM,
+  DEFAULT_MAX_NONCES_PER_SENDER,
   DEFAULT_MAX_WS_SESSIONS,
+  DEFAULT_NONCE_TTL_SEC,
   DEFAULT_PUBLISH_LIMIT_PER_WINDOW,
   DEFAULT_PUBLISH_PAYLOAD_MAX_BYTES,
   DEFAULT_PUBLISH_WINDOW_MS,
+  DEFAULT_REQUIRE_SIGNATURES,
   DEFAULT_ROOM,
   healthResponse,
   isValidRoomName,

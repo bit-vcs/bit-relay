@@ -36,6 +36,14 @@ function parseRoomTokens(raw: string | undefined): Record<string, string> {
   }
 }
 
+function parseBoolean(raw: string | undefined, fallback: boolean): boolean {
+  if (typeof raw !== 'string') return fallback;
+  const value = raw.trim().toLowerCase();
+  if (value === '1' || value === 'true' || value === 'yes' || value === 'on') return true;
+  if (value === '0' || value === 'false' || value === 'no' || value === 'off') return false;
+  return fallback;
+}
+
 function optionsFromEnv(): MemoryRelayOptions {
   return {
     authToken: Deno.env.get('CLUSTER_API_TOKEN') ?? undefined,
@@ -59,6 +67,19 @@ function optionsFromEnv(): MemoryRelayOptions {
     maxWsSessions: parsePositiveInt(
       Deno.env.get('MAX_WS_SESSIONS') ?? undefined,
       DEFAULT_MAX_WS_SESSIONS,
+    ),
+    requireSignatures: parseBoolean(
+      Deno.env.get('RELAY_REQUIRE_SIGNATURE') ?? undefined,
+      true,
+    ),
+    maxClockSkewSec: parsePositiveInt(
+      Deno.env.get('RELAY_MAX_CLOCK_SKEW_SEC') ?? undefined,
+      300,
+    ),
+    nonceTtlSec: parsePositiveInt(Deno.env.get('RELAY_NONCE_TTL_SEC') ?? undefined, 600),
+    maxNoncesPerSender: parsePositiveInt(
+      Deno.env.get('RELAY_MAX_NONCES_PER_SENDER') ?? undefined,
+      2048,
     ),
   };
 }

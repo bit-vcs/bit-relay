@@ -41,6 +41,10 @@ export interface RelayWorkerEnv {
   RELAY_PUBLISH_WINDOW_MS?: string;
   RELAY_ROOM_TOKENS?: string;
   MAX_WS_SESSIONS?: string;
+  RELAY_REQUIRE_SIGNATURE?: string;
+  RELAY_MAX_CLOCK_SKEW_SEC?: string;
+  RELAY_NONCE_TTL_SEC?: string;
+  RELAY_MAX_NONCES_PER_SENDER?: string;
 }
 
 const SNAPSHOT_KEY = 'relay_snapshot_v1';
@@ -74,6 +78,14 @@ function parseRoomTokens(raw: string | undefined): Record<string, string> {
   }
 }
 
+function parseBoolean(raw: string | undefined, fallback: boolean): boolean {
+  if (typeof raw !== 'string') return fallback;
+  const value = raw.trim().toLowerCase();
+  if (value === '1' || value === 'true' || value === 'yes' || value === 'on') return true;
+  if (value === '0' || value === 'false' || value === 'no' || value === 'off') return false;
+  return fallback;
+}
+
 function buildOptions(env: RelayWorkerEnv): MemoryRelayOptions {
   return {
     authToken: env.CLUSTER_API_TOKEN,
@@ -92,6 +104,10 @@ function buildOptions(env: RelayWorkerEnv): MemoryRelayOptions {
     publishWindowMs: parsePositiveInt(env.RELAY_PUBLISH_WINDOW_MS, DEFAULT_PUBLISH_WINDOW_MS),
     roomTokens: parseRoomTokens(env.RELAY_ROOM_TOKENS),
     maxWsSessions: parsePositiveInt(env.MAX_WS_SESSIONS, DEFAULT_MAX_WS_SESSIONS),
+    requireSignatures: parseBoolean(env.RELAY_REQUIRE_SIGNATURE, true),
+    maxClockSkewSec: parsePositiveInt(env.RELAY_MAX_CLOCK_SKEW_SEC, 300),
+    nonceTtlSec: parsePositiveInt(env.RELAY_NONCE_TTL_SEC, 600),
+    maxNoncesPerSender: parsePositiveInt(env.RELAY_MAX_NONCES_PER_SENDER, 2048),
   };
 }
 
