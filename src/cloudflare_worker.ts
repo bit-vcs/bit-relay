@@ -12,6 +12,7 @@ import {
   type MemoryRelayService,
   type RelaySnapshot,
 } from './memory_handler.ts';
+import { GitServeSession } from './git_serve_session.ts';
 
 interface DurableObjectStubLike {
   fetch(request: Request): Promise<Response>;
@@ -34,6 +35,7 @@ interface DurableObjectStateLike {
 
 export interface RelayWorkerEnv {
   RELAY_ROOM?: DurableObjectNamespaceLike;
+  GIT_SERVE_SESSION?: DurableObjectNamespaceLike;
   CLUSTER_API_TOKEN?: string;
   RELAY_MAX_MESSAGES_PER_ROOM?: string;
   PUBLISH_PAYLOAD_MAX_BYTES?: string;
@@ -115,6 +117,121 @@ function isRelayRoute(pathname: string): boolean {
   return pathname === '/' || pathname === '/ws' || pathname.startsWith('/api/v1/');
 }
 
+const SESSION_ID_PATTERN = /^[A-Za-z0-9]{6,16}$/;
+
+function generateSessionId(): string {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  const bytes = new Uint8Array(8);
+  crypto.getRandomValues(bytes);
+  let result = '';
+  for (let i = 0; i < 8; i++) {
+    result += chars[bytes[i] % chars.length];
+  }
+  return result;
+}
+
+function getGitServeSessionStub(
+  env: RelayWorkerEnv,
+  sessionId: string,
+): DurableObjectStubLike | null {
+  if (!env.GIT_SERVE_SESSION) return null;
+  const id = env.GIT_SERVE_SESSION.idFromName(sessionId);
+  return env.GIT_SERVE_SESSION.get(id);
+}
+
+function handleServeRoute(
+  url: URL,
+  request: Request,
+  env: RelayWorkerEnv,
+): Response | Promise<Response> {
+  const pathname = url.pathname;
+
+  if (pathname === '/api/v1/serve/register' && request.method === 'POST') {
+    const sessionId = generateSessionId();
+    const stub = getGitServeSessionStub(env, sessionId);
+    if (!stub) {
+      return Response.json(
+        { ok: false, error: 'git serve sessions not available' },
+        { status: 503 },
+      );
+    }
+    return stub
+      .fetch(new Request('http://do/register', { method: 'POST' }))
+      .then(async (doRes) => {
+        const body = (await doRes.json()) as Record<string, unknown>;
+        if (body.ok) {
+          return Response.json({ ok: true, session_id: sessionId });
+        }
+        return Response.json(body, { status: doRes.status });
+      });
+  }
+
+  const sessionParam = url.searchParams.get('session') ?? '';
+  if (!SESSION_ID_PATTERN.test(sessionParam)) {
+    return Response.json(
+      { ok: false, error: 'invalid or missing session id' },
+      { status: 400 },
+    );
+  }
+
+  const stub = getGitServeSessionStub(env, sessionParam);
+  if (!stub) {
+    return Response.json(
+      { ok: false, error: 'git serve sessions not available' },
+      { status: 503 },
+    );
+  }
+
+  if (pathname === '/api/v1/serve/poll' && request.method === 'GET') {
+    const timeout = url.searchParams.get('timeout') ?? '30';
+    return stub.fetch(
+      new Request(`http://do/poll?timeout=${encodeURIComponent(timeout)}`),
+    );
+  }
+
+  if (pathname === '/api/v1/serve/respond' && request.method === 'POST') {
+    return stub.fetch(
+      new Request('http://do/respond', {
+        method: 'POST',
+        headers: request.headers,
+        body: request.body,
+      }),
+    );
+  }
+
+  if (pathname === '/api/v1/serve/info' && request.method === 'GET') {
+    return stub.fetch(new Request('http://do/info'));
+  }
+
+  return Response.json({ ok: false, error: 'not found' }, { status: 404 });
+}
+
+function handleGitRoute(
+  sessionId: string,
+  gitPath: string,
+  request: Request,
+  env: RelayWorkerEnv,
+): Response | Promise<Response> {
+  const stub = getGitServeSessionStub(env, sessionId);
+  if (!stub) {
+    return Response.json(
+      { ok: false, error: 'git serve sessions not available' },
+      { status: 503 },
+    );
+  }
+
+  const url = new URL(request.url);
+  const doUrl = `http://do/git/${gitPath}${url.search}`;
+
+  return stub.fetch(
+    new Request(doUrl, {
+      method: request.method,
+      headers: request.headers,
+      body: request.body,
+    }),
+  );
+}
+
 function invalidRoomResponse(): Response {
   return Response.json({ ok: false, error: 'invalid room' }, { status: 400 });
 }
@@ -160,6 +277,17 @@ const worker = {
       return healthResponse();
     }
 
+    // Git serve session routes: /git/<session_id>/...
+    const gitMatch = url.pathname.match(/^\/git\/([A-Za-z0-9]{6,16})\/(.*)/);
+    if (gitMatch) {
+      return handleGitRoute(gitMatch[1], gitMatch[2], request, env);
+    }
+
+    // Serve API routes: /api/v1/serve/...
+    if (url.pathname.startsWith('/api/v1/serve/')) {
+      return handleServeRoute(url, request, env);
+    }
+
     if (!isRelayRoute(url.pathname)) {
       return Response.json({ ok: false, error: 'not found' }, { status: 404 });
     }
@@ -182,4 +310,5 @@ const worker = {
   },
 };
 
+export { GitServeSession };
 export default worker;

@@ -8,6 +8,10 @@
       {
         "name": "RELAY_ROOM",
         "class_name": "RelayRoom"
+      },
+      {
+        "name": "GIT_SERVE_SESSION",
+        "class_name": "GitServeSession"
       }
     ]
   },
@@ -16,6 +20,12 @@
       "tag": "v1",
       "new_classes": [
         "RelayRoom"
+      ]
+    },
+    {
+      "tag": "v2",
+      "new_classes": [
+        "GitServeSession"
       ]
     }
   ]
