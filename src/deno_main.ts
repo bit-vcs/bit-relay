@@ -113,6 +113,13 @@ function getOrCreateSession(sessionId: string): ReturnType<typeof createGitServe
   return session;
 }
 
+function extractSessionToken(request: Request): string {
+  const url = new URL(request.url);
+  return url.searchParams.get('session_token')
+    ?? request.headers.get('x-session-token')
+    ?? '';
+}
+
 async function handleRequest(request: Request): Promise<Response> {
   const url = new URL(request.url);
   const pathname = url.pathname;
@@ -152,7 +159,11 @@ async function handleRequest(request: Request): Promise<Response> {
       return Response.json({ ok: false, error: 'session not found' }, { status: 404 });
     }
     const timeout = url.searchParams.get('timeout') ?? '30';
-    const sessionRequest = new Request(`http://localhost/poll?timeout=${timeout}`, { method: 'GET' });
+    const token = extractSessionToken(request);
+    const sessionRequest = new Request(
+      `http://localhost/poll?timeout=${timeout}&session_token=${encodeURIComponent(token)}`,
+      { method: 'GET' },
+    );
     return session.fetch(sessionRequest);
   }
 
@@ -165,11 +176,15 @@ async function handleRequest(request: Request): Promise<Response> {
     if (!session) {
       return Response.json({ ok: false, error: 'session not found' }, { status: 404 });
     }
-    const sessionRequest = new Request('http://localhost/respond', {
-      method: 'POST',
-      headers: request.headers,
-      body: request.body,
-    });
+    const token = extractSessionToken(request);
+    const sessionRequest = new Request(
+      `http://localhost/respond?session_token=${encodeURIComponent(token)}`,
+      {
+        method: 'POST',
+        headers: request.headers,
+        body: request.body,
+      },
+    );
     return session.fetch(sessionRequest);
   }
 
@@ -182,7 +197,11 @@ async function handleRequest(request: Request): Promise<Response> {
     if (!session) {
       return Response.json({ ok: false, error: 'session not found' }, { status: 404 });
     }
-    const sessionRequest = new Request('http://localhost/info', { method: 'GET' });
+    const token = extractSessionToken(request);
+    const sessionRequest = new Request(
+      `http://localhost/info?session_token=${encodeURIComponent(token)}`,
+      { method: 'GET' },
+    );
     return session.fetch(sessionRequest);
   }
 

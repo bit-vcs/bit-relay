@@ -16,6 +16,7 @@ interface PollWaiter {
 
 export interface GitServeSessionState {
   active: boolean;
+  sessionToken: string;
   pendingRequests: Map<string, PendingGitRequest>;
   pollWaiters: PollWaiter[];
   registeredAt: number | null;
@@ -27,6 +28,16 @@ const SESSION_TTL_MS = 60 * 60 * 1000;
 
 function generateRequestId(): string {
   return crypto.randomUUID();
+}
+
+function generateSessionToken(): string {
+  const bytes = new Uint8Array(24);
+  crypto.getRandomValues(bytes);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
 }
 
 function toBase64(data: Uint8Array): string {
@@ -53,6 +64,7 @@ export function createGitServeSession(): {
 } {
   const state: GitServeSessionState = {
     active: false,
+    sessionToken: '',
     pendingRequests: new Map(),
     pollWaiters: [],
     registeredAt: null,
@@ -90,13 +102,37 @@ export function createGitServeSession(): {
   }
 
   function handleRegister(): Response {
+    state.sessionToken = generateSessionToken();
     state.active = true;
     state.registeredAt = Date.now();
     resetSessionTimer();
-    return Response.json({ ok: true });
+    return Response.json({ ok: true, session_token: state.sessionToken });
   }
 
-  function handleInfo(): Response {
+  function validateToken(request: Request): Response | null {
+    if (!state.active) {
+      return Response.json(
+        { ok: false, error: 'session not active' },
+        { status: 404 },
+      );
+    }
+    const url = new URL(request.url);
+    const token =
+      url.searchParams.get('session_token') ??
+      request.headers.get('x-session-token') ??
+      '';
+    if (token !== state.sessionToken) {
+      return Response.json(
+        { ok: false, error: 'invalid session token' },
+        { status: 403 },
+      );
+    }
+    return null;
+  }
+
+  function handleInfo(request: Request): Response {
+    const denied = validateToken(request);
+    if (denied) return denied;
     return Response.json({
       ok: true,
       active: state.active,
@@ -118,12 +154,8 @@ export function createGitServeSession(): {
   }
 
   async function handleGitRequest(request: Request, gitPath: string): Promise<Response> {
-    if (!state.active) {
-      return Response.json(
-        { ok: false, error: 'session not active' },
-        { status: 404 },
-      );
-    }
+    const denied = validateToken(request);
+    if (denied) return denied;
 
     const requestId = generateRequestId();
     let bodyBase64: string | null = null;
@@ -146,6 +178,7 @@ export function createGitServeSession(): {
     }
 
     const url = new URL(request.url);
+    url.searchParams.delete('session_token');
     const queryString = url.search;
     const fullPath = gitPath + queryString;
 
@@ -177,14 +210,8 @@ export function createGitServeSession(): {
   }
 
   function handlePoll(request: Request): Promise<Response> {
-    if (!state.active) {
-      return Promise.resolve(
-        Response.json(
-          { ok: false, error: 'session not active' },
-          { status: 404 },
-        ),
-      );
-    }
+    const denied = validateToken(request);
+    if (denied) return Promise.resolve(denied);
 
     const url = new URL(request.url);
     const timeoutParam = parseInt(url.searchParams.get('timeout') ?? '30', 10);
@@ -229,12 +256,8 @@ export function createGitServeSession(): {
   }
 
   async function handleRespond(request: Request): Promise<Response> {
-    if (!state.active) {
-      return Response.json(
-        { ok: false, error: 'session not active' },
-        { status: 404 },
-      );
-    }
+    const denied = validateToken(request);
+    if (denied) return denied;
 
     let parsed: unknown;
     try {
@@ -304,7 +327,7 @@ export function createGitServeSession(): {
     }
 
     if (path === '/info' && request.method === 'GET') {
-      return handleInfo();
+      return handleInfo(request);
     }
 
     if (path === '/poll' && request.method === 'GET') {

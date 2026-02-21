@@ -139,6 +139,13 @@ function getGitServeSessionStub(
   return env.GIT_SERVE_SESSION.get(id);
 }
 
+function extractSessionToken(request: Request): string {
+  const url = new URL(request.url);
+  return url.searchParams.get('session_token')
+    ?? request.headers.get('x-session-token')
+    ?? '';
+}
+
 function handleServeRoute(
   url: URL,
   request: Request,
@@ -184,14 +191,16 @@ function handleServeRoute(
 
   if (pathname === '/api/v1/serve/poll' && request.method === 'GET') {
     const timeout = url.searchParams.get('timeout') ?? '30';
+    const token = extractSessionToken(request);
     return stub.fetch(
-      new Request(`http://do/poll?timeout=${encodeURIComponent(timeout)}`),
+      new Request(`http://do/poll?timeout=${encodeURIComponent(timeout)}&session_token=${encodeURIComponent(token)}`),
     );
   }
 
   if (pathname === '/api/v1/serve/respond' && request.method === 'POST') {
+    const token = extractSessionToken(request);
     return stub.fetch(
-      new Request('http://do/respond', {
+      new Request(`http://do/respond?session_token=${encodeURIComponent(token)}`, {
         method: 'POST',
         headers: request.headers,
         body: request.body,
@@ -200,7 +209,10 @@ function handleServeRoute(
   }
 
   if (pathname === '/api/v1/serve/info' && request.method === 'GET') {
-    return stub.fetch(new Request('http://do/info'));
+    const token = extractSessionToken(request);
+    return stub.fetch(
+      new Request(`http://do/info?session_token=${encodeURIComponent(token)}`),
+    );
   }
 
   return Response.json({ ok: false, error: 'not found' }, { status: 404 });

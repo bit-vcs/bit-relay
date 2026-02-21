@@ -1,12 +1,22 @@
-import { assertEquals, assertObjectMatch } from '@std/assert';
+import { assert, assertEquals, assertObjectMatch } from '@std/assert';
 import { createGitServeSession } from '../src/git_serve_session.ts';
+
+async function registerSession(
+  session: ReturnType<typeof createGitServeSession>,
+): Promise<string> {
+  const res = await session.fetch(new Request('http://do/register', { method: 'POST' }));
+  const body = await res.json();
+  return body.session_token;
+}
 
 Deno.test('register activates session', async () => {
   const session = createGitServeSession();
   try {
     const res = await session.fetch(new Request('http://do/register', { method: 'POST' }));
     assertEquals(res.status, 200);
-    assertObjectMatch(await res.json(), { ok: true });
+    const body = await res.json();
+    assertEquals(body.ok, true);
+    assertEquals(typeof body.session_token, 'string');
     assertEquals(session.state.active, true);
   } finally {
     session.cleanup();
@@ -16,8 +26,10 @@ Deno.test('register activates session', async () => {
 Deno.test('info returns session state', async () => {
   const session = createGitServeSession();
   try {
-    await session.fetch(new Request('http://do/register', { method: 'POST' }));
-    const res = await session.fetch(new Request('http://do/info'));
+    const token = await registerSession(session);
+    const res = await session.fetch(
+      new Request(`http://do/info?session_token=${token}`),
+    );
     assertEquals(res.status, 200);
     const body = await res.json();
     assertObjectMatch(body, {
@@ -58,19 +70,20 @@ Deno.test('poll without active session returns 404', async () => {
 Deno.test('full flow: git request → poll → respond', async () => {
   const session = createGitServeSession();
   try {
-    // Register session
-    await session.fetch(new Request('http://do/register', { method: 'POST' }));
+    const token = await registerSession(session);
 
     // Start a git request (clone side) — will block until responded
     const gitRequestPromise = session.fetch(
-      new Request('http://do/git/info/refs?service=git-upload-pack'),
+      new Request(`http://do/git/info/refs?service=git-upload-pack&session_token=${token}`),
     );
 
     // Give the event loop a tick for the request to be queued
     await new Promise((r) => setTimeout(r, 10));
 
     // Poll (serve side) — should get the queued request
-    const pollRes = await session.fetch(new Request('http://do/poll?timeout=1'));
+    const pollRes = await session.fetch(
+      new Request(`http://do/poll?timeout=1&session_token=${token}`),
+    );
     assertEquals(pollRes.status, 200);
     const pollBody = await pollRes.json();
     assertEquals(pollBody.ok, true);
@@ -91,7 +104,7 @@ Deno.test('full flow: git request → poll → respond', async () => {
     const bodyBase64 = btoa(binary);
 
     const respondRes = await session.fetch(
-      new Request('http://do/respond', {
+      new Request(`http://do/respond?session_token=${token}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
@@ -122,9 +135,11 @@ Deno.test('full flow: git request → poll → respond', async () => {
 Deno.test('poll returns empty on timeout when no requests', async () => {
   const session = createGitServeSession();
   try {
-    await session.fetch(new Request('http://do/register', { method: 'POST' }));
+    const token = await registerSession(session);
 
-    const pollRes = await session.fetch(new Request('http://do/poll?timeout=1'));
+    const pollRes = await session.fetch(
+      new Request(`http://do/poll?timeout=1&session_token=${token}`),
+    );
     assertEquals(pollRes.status, 200);
     const body = await pollRes.json();
     assertEquals(body.ok, true);
@@ -137,10 +152,10 @@ Deno.test('poll returns empty on timeout when no requests', async () => {
 Deno.test('respond with invalid request_id returns 404', async () => {
   const session = createGitServeSession();
   try {
-    await session.fetch(new Request('http://do/register', { method: 'POST' }));
+    const token = await registerSession(session);
 
     const res = await session.fetch(
-      new Request('http://do/respond', {
+      new Request(`http://do/respond?session_token=${token}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
@@ -161,10 +176,10 @@ Deno.test('respond with invalid request_id returns 404', async () => {
 Deno.test('respond with missing request_id returns 400', async () => {
   const session = createGitServeSession();
   try {
-    await session.fetch(new Request('http://do/register', { method: 'POST' }));
+    const token = await registerSession(session);
 
     const res = await session.fetch(
-      new Request('http://do/respond', {
+      new Request(`http://do/respond?session_token=${token}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
@@ -183,11 +198,11 @@ Deno.test('respond with missing request_id returns 400', async () => {
 Deno.test('POST git request carries body', async () => {
   const session = createGitServeSession();
   try {
-    await session.fetch(new Request('http://do/register', { method: 'POST' }));
+    const token = await registerSession(session);
 
     const requestBody = 'some-pack-data';
     const gitRequestPromise = session.fetch(
-      new Request('http://do/git/git-upload-pack', {
+      new Request(`http://do/git/git-upload-pack?session_token=${token}`, {
         method: 'POST',
         headers: { 'content-type': 'application/x-git-upload-pack-request' },
         body: requestBody,
@@ -196,7 +211,9 @@ Deno.test('POST git request carries body', async () => {
 
     await new Promise((r) => setTimeout(r, 10));
 
-    const pollRes = await session.fetch(new Request('http://do/poll?timeout=1'));
+    const pollRes = await session.fetch(
+      new Request(`http://do/poll?timeout=1&session_token=${token}`),
+    );
     const pollBody = await pollRes.json();
     assertEquals(pollBody.requests.length, 1);
     assertEquals(pollBody.requests[0].method, 'POST');
@@ -219,7 +236,7 @@ Deno.test('POST git request carries body', async () => {
     }
 
     await session.fetch(
-      new Request('http://do/respond', {
+      new Request(`http://do/respond?session_token=${token}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
@@ -241,10 +258,10 @@ Deno.test('POST git request carries body', async () => {
 
 Deno.test('cleanup resolves pending requests with 410', async () => {
   const session = createGitServeSession();
-  await session.fetch(new Request('http://do/register', { method: 'POST' }));
+  const token = await registerSession(session);
 
   const gitRequestPromise = session.fetch(
-    new Request('http://do/git/info/refs?service=git-upload-pack'),
+    new Request(`http://do/git/info/refs?service=git-upload-pack&session_token=${token}`),
   );
 
   await new Promise((r) => setTimeout(r, 10));
@@ -262,6 +279,121 @@ Deno.test('unknown route returns 404', async () => {
   try {
     const res = await session.fetch(new Request('http://do/unknown'));
     assertEquals(res.status, 404);
+  } finally {
+    session.cleanup();
+  }
+});
+
+// --- session_token tests ---
+
+Deno.test('register returns session_token', async () => {
+  const session = createGitServeSession();
+  try {
+    const res = await session.fetch(new Request('http://do/register', { method: 'POST' }));
+    const body = await res.json();
+    assertEquals(body.ok, true);
+    assertEquals(typeof body.session_token, 'string');
+    assert(body.session_token.length >= 16, 'token should be at least 16 chars');
+  } finally {
+    session.cleanup();
+  }
+});
+
+Deno.test('poll without session_token returns 403', async () => {
+  const session = createGitServeSession();
+  try {
+    await registerSession(session);
+    const res = await session.fetch(new Request('http://do/poll?timeout=1'));
+    assertEquals(res.status, 403);
+    assertObjectMatch(await res.json(), { ok: false, error: 'invalid session token' });
+  } finally {
+    session.cleanup();
+  }
+});
+
+Deno.test('poll with wrong session_token returns 403', async () => {
+  const session = createGitServeSession();
+  try {
+    await registerSession(session);
+    const res = await session.fetch(
+      new Request('http://do/poll?timeout=1&session_token=wrong'),
+    );
+    assertEquals(res.status, 403);
+    assertObjectMatch(await res.json(), { ok: false, error: 'invalid session token' });
+  } finally {
+    session.cleanup();
+  }
+});
+
+Deno.test('poll with valid session_token succeeds', async () => {
+  const session = createGitServeSession();
+  try {
+    const token = await registerSession(session);
+
+    const res = await session.fetch(
+      new Request(`http://do/poll?timeout=1&session_token=${token}`),
+    );
+    assertEquals(res.status, 200);
+    const body = await res.json();
+    assertEquals(body.ok, true);
+  } finally {
+    session.cleanup();
+  }
+});
+
+Deno.test('session_token via x-session-token header works', async () => {
+  const session = createGitServeSession();
+  try {
+    const token = await registerSession(session);
+
+    const res = await session.fetch(
+      new Request('http://do/poll?timeout=1', {
+        headers: { 'x-session-token': token },
+      }),
+    );
+    assertEquals(res.status, 200);
+    assertEquals((await res.json()).ok, true);
+  } finally {
+    session.cleanup();
+  }
+});
+
+Deno.test('git request without session_token returns 403', async () => {
+  const session = createGitServeSession();
+  try {
+    await registerSession(session);
+    const res = await session.fetch(
+      new Request('http://do/git/info/refs?service=git-upload-pack'),
+    );
+    assertEquals(res.status, 403);
+  } finally {
+    session.cleanup();
+  }
+});
+
+Deno.test('respond without session_token returns 403', async () => {
+  const session = createGitServeSession();
+  try {
+    await registerSession(session);
+    const res = await session.fetch(
+      new Request('http://do/respond', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ request_id: 'x', status: 200, headers: {} }),
+      }),
+    );
+    assertEquals(res.status, 403);
+  } finally {
+    session.cleanup();
+  }
+});
+
+Deno.test('info without session_token returns 403', async () => {
+  const session = createGitServeSession();
+  try {
+    await registerSession(session);
+    const res = await session.fetch(new Request('http://do/info'));
+    assertEquals(res.status, 403);
   } finally {
     session.cleanup();
   }

@@ -17,6 +17,29 @@
 - `GET /api/v1/key/info?sender=<sender>`
 - `POST /api/v1/key/rotate`
 
+### Git Serve Session (relay-proxied clone)
+
+NAT/FW 越しに git clone/fetch を relay 経由で中継するセッション機構。
+
+- `POST /api/v1/serve/register` → `{ ok, session_id, session_token }`
+- `GET /api/v1/serve/poll?session=<id>&session_token=<token>&timeout=<sec>`
+- `POST /api/v1/serve/respond?session=<id>&session_token=<token>`
+- `GET /api/v1/serve/info?session=<id>&session_token=<token>`
+- `GET /git/<session_id>/<path>?session_token=<token>` — git HTTP リクエスト
+
+`session_token` は register 時に自動生成され、以降の全エンドポイントで必須です。
+query param `session_token` または header `x-session-token` で渡せます。
+トークン不一致の場合は `403 invalid session token` を返します。
+
+フロー:
+
+```
+Clone side → GET /git/<session>/info/refs?session_token=xxx → (queued)
+Serve side → GET /api/v1/serve/poll?session=...&session_token=xxx → requests[]
+Serve side → POST /api/v1/serve/respond (with response) → ok
+Clone side → (response resolved)
+```
+
 ## Compatibility
 
 - `bit hub sync` 向けに `payload.kind=hub.record` をそのまま保持
