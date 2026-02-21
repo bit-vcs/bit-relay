@@ -223,13 +223,15 @@ function handleGitRoute(
   const url = new URL(request.url);
   const doUrl = `http://do/git/${gitPath}${url.search}`;
 
-  return stub.fetch(
-    new Request(doUrl, {
-      method: request.method,
-      headers: request.headers,
-      body: request.body,
-    }),
-  );
+  const init: RequestInit = {
+    method: request.method,
+    headers: request.headers,
+  };
+  if (request.method !== 'GET' && request.method !== 'HEAD') {
+    init.body = request.body;
+  }
+
+  return stub.fetch(new Request(doUrl, init));
 }
 
 function invalidRoomResponse(): Response {
