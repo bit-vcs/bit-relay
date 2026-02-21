@@ -128,6 +128,35 @@ pnpm run deploy
 
 `wrangler.jsonc` は Durable Object `RelayRoom` を使用します。
 
+## Run on sprites.dev
+
+sprites 側は `0.0.0.0:8080` を公開ポートとして扱うため、relay も `PORT=8080` で常駐させます。
+
+```bash
+# sprite CLI でログイン済みの前提
+# 既定: sprite=myapp, auth=public, signature-required=true
+just deploy-sprites myapp
+```
+
+直接実行する場合:
+
+```bash
+SPRITE_NAME=myapp URL_AUTH=public RELAY_REQUIRE_SIGNATURE=true \
+  tools/deploy-sprites.sh
+```
+
+ログ確認:
+
+```bash
+just sprites-logs myapp
+```
+
+`bit` 側は `hub sync issue-url` で共有URLを発行できます:
+
+```bash
+bit hub sync issue-url relay+https://<sprite-url> --room <room> --room-token <token>
+```
+
 ## Basic checks
 
 ```bash
