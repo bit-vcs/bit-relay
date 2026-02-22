@@ -153,6 +153,7 @@ async function objectRoom(objectHash: string): Promise<string> {
 }
 
 /** Derive room for a git repo by its fingerprint (like IPFS swarm) */
+// deno-lint-ignore require-await
 async function repoSwarmRoom(repoFingerprint: string): Promise<string> {
   return contentRoom(`git:repo:${repoFingerprint}`);
 }
@@ -442,7 +443,7 @@ Deno.test('content-addressed sync: per-object rooms for fine-grained discovery',
     }
 
     // A new node wants obj-A, obj-C, obj-D
-    const seeker = await registerNode(relay.baseUrl, 'seeker');
+    const _seeker = await registerNode(relay.baseUrl, 'seeker');
     const seekerObjects = new Set<string>();
     const wanted = ['obj-A', 'obj-C', 'obj-D'];
 
@@ -504,11 +505,11 @@ Deno.test('content-addressed sync: multi-repo isolation via fingerprint', async 
 
     // Repo Alpha: 2 nodes
     const alphaA = await registerNode(relay.baseUrl, 'alpha-A');
-    const alphaB = await registerNode(relay.baseUrl, 'alpha-B');
+    const _alphaB = await registerNode(relay.baseUrl, 'alpha-B');
 
     // Repo Beta: 2 nodes
     const betaA = await registerNode(relay.baseUrl, 'beta-A');
-    const betaB = await registerNode(relay.baseUrl, 'beta-B');
+    const _betaB = await registerNode(relay.baseUrl, 'beta-B');
 
     // Publish to respective rooms
     await publish(
@@ -653,6 +654,7 @@ Deno.test('content-addressed sync: forked repos discover each other via shared a
     const forkBObjects = new Set([...sharedObjects, ...forkBOnly]);
 
     // Each node advertises its objects in per-object rooms
+    // deno-lint-ignore no-inner-declarations
     async function advertiseObjects(node: NodeInfo, objects: Set<string>) {
       for (const obj of objects) {
         const room = await objectRoom(obj);
@@ -745,11 +747,11 @@ Deno.test('content-addressed sync: independently created repos discover shared c
 
     // repo-X objects (independent history)
     const repoXNode = await registerNode(relay.baseUrl, 'repo-X');
-    const repoXObjects = ['init-X', 'commit-X1', 'tree-X1', SHARED_BLOB, 'blob-app-X'];
+    const _repoXObjects = ['init-X', 'commit-X1', 'tree-X1', SHARED_BLOB, 'blob-app-X'];
 
     // repo-Y objects (independent history, shares one blob)
     const repoYNode = await registerNode(relay.baseUrl, 'repo-Y');
-    const repoYObjects = ['init-Y', 'commit-Y1', 'tree-Y1', SHARED_BLOB, 'blob-app-Y'];
+    const _repoYObjects = ['init-Y', 'commit-Y1', 'tree-Y1', SHARED_BLOB, 'blob-app-Y'];
 
     // Both advertise the shared blob
     await publish(relay.baseUrl, sharedRoom, repoXNode.name, 'provide-X', {
@@ -817,6 +819,7 @@ Deno.test('content-addressed sync: progressive discovery via overlap expansion',
     const unrelatedObjs = ['tree-root', 'blob-shared'];
 
     // Advertise all objects
+    // deno-lint-ignore no-inner-declarations
     async function advertise(node: NodeInfo, objs: string[]) {
       for (const obj of objs) {
         const room = await objectRoom(obj);
@@ -835,6 +838,7 @@ Deno.test('content-addressed sync: progressive discovery via overlap expansion',
     await advertise(unrelatedNode, unrelatedObjs);
 
     // Also publish manifests
+    // deno-lint-ignore no-inner-declarations
     async function publishManifest(node: NodeInfo, objs: string[]) {
       const room = await contentRoom(`manifest:${node.name}`);
       await publish(relay.baseUrl, room, node.name, `manifest-${node.name}`, {

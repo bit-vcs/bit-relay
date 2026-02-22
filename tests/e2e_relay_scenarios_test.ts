@@ -233,7 +233,7 @@ Deno.test('chain relay: A→B→C→D→E multi-hop propagation', async () => {
     for (let i = 0; i < 5; i++) {
       nodes.push(await registerNode(relay.baseUrl, `node-${i}`));
     }
-    const [A, B, C, D, E] = nodes;
+    const [A, B, C, D, _E] = nodes;
 
     const originalData = 'commit-abc123-from-node-A';
 
@@ -332,7 +332,7 @@ Deno.test('partition bridge: two isolated groups connected by bridge node', asyn
     for (let i = 0; i < 5; i++) {
       nodes.push(await registerNode(relay.baseUrl, `node-${i}`));
     }
-    const [A, B, C, D, E] = nodes;
+    const [A, B, C, _D, _E] = nodes;
 
     // Group 1: A and B publish to partition-1
     await publish(relay.baseUrl, 'partition-1', A.name, 'msg-A-1', {
@@ -549,7 +549,7 @@ Deno.test('chain break: removing intermediate node stops propagation', async () 
 
   const relay = startRelay();
   try {
-    const [A, B, C] = await Promise.all([
+    const [A, B, _C] = await Promise.all([
       registerNode(relay.baseUrl, 'node-A'),
       registerNode(relay.baseUrl, 'node-B'),
       registerNode(relay.baseUrl, 'node-C'),

@@ -317,6 +317,7 @@ export function createGitServeSession(): {
     return Response.json({ ok: true });
   }
 
+  // deno-lint-ignore require-await
   async function fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
@@ -356,6 +357,7 @@ export class GitServeSession {
     this.session = createGitServeSession();
   }
 
+  // deno-lint-ignore require-await
   async fetch(request: Request): Promise<Response> {
     return this.session.fetch(request);
   }

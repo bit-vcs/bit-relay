@@ -1,4 +1,4 @@
-import { assert, assertEquals, assertNotEquals } from '@std/assert';
+import { assert, assertEquals } from '@std/assert';
 import { createMemoryRelayService } from '../src/memory_handler.ts';
 import { createGitServeSession } from '../src/git_serve_session.ts';
 
@@ -329,7 +329,7 @@ Deno.test('e2e: 4 clients clone from 1 server concurrently', async () => {
     }
 
     // 4 clients make git requests concurrently
-    const gitPromises = clients.map((c) =>
+    const gitPromises = clients.map((_c) =>
       fetch(
         `${relay.baseUrl}/git/${server.sessionId}/info/refs?service=git-upload-pack&session_token=${server.sessionToken}`,
       )
@@ -408,7 +408,7 @@ Deno.test('e2e: broadcast triggers cross-node fetch (5 nodes)', async () => {
     assertEquals((await pubRes.json()).ok, true);
 
     // Nodes 1-4 poll the room and detect the broadcast
-    const pollers = nodes.slice(1).map(async (node) => {
+    const pollers = nodes.slice(1).map(async (_node) => {
       const res = await fetch(
         `${relay.baseUrl}/api/v1/poll?room=${room}&after=0&limit=10`,
       );

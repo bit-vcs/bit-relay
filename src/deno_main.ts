@@ -133,7 +133,7 @@ async function handleRequest(request: Request): Promise<Response> {
   const gitMatch = pathname.match(/^\/git\/([A-Za-z0-9]{6,16})\/(.*)/);
   if (gitMatch) {
     const sessionId = gitMatch[1];
-    const gitPath = '/' + gitMatch[2];
+    const _gitPath = '/' + gitMatch[2];
     const session = gitServeSessions.get(sessionId);
     if (!session) {
       return Response.json({ ok: false, error: 'session not found' }, { status: 404 });
