@@ -170,7 +170,7 @@ function handleServeRoute(
       .then(async (doRes) => {
         const body = (await doRes.json()) as Record<string, unknown>;
         if (body.ok) {
-          return Response.json({ ok: true, session_id: sessionId });
+          return Response.json({ ...body, session_id: sessionId });
         }
         return Response.json(body, { status: doRes.status });
       });
