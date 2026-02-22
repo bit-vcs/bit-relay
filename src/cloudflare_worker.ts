@@ -2,6 +2,7 @@ import {
   createMemoryRelayService,
   DEFAULT_MAX_MESSAGES_PER_ROOM,
   DEFAULT_MAX_WS_SESSIONS,
+  DEFAULT_PRESENCE_TTL_SEC,
   DEFAULT_PUBLISH_LIMIT_PER_WINDOW,
   DEFAULT_PUBLISH_PAYLOAD_MAX_BYTES,
   DEFAULT_PUBLISH_WINDOW_MS,
@@ -47,6 +48,7 @@ export interface RelayWorkerEnv {
   RELAY_MAX_CLOCK_SKEW_SEC?: string;
   RELAY_NONCE_TTL_SEC?: string;
   RELAY_MAX_NONCES_PER_SENDER?: string;
+  RELAY_PRESENCE_TTL_SEC?: string;
 }
 
 const SNAPSHOT_KEY = 'relay_snapshot_v1';
@@ -110,6 +112,7 @@ function buildOptions(env: RelayWorkerEnv): MemoryRelayOptions {
     maxClockSkewSec: parsePositiveInt(env.RELAY_MAX_CLOCK_SKEW_SEC, 300),
     nonceTtlSec: parsePositiveInt(env.RELAY_NONCE_TTL_SEC, 600),
     maxNoncesPerSender: parsePositiveInt(env.RELAY_MAX_NONCES_PER_SENDER, 2048),
+    presenceTtlSec: parsePositiveInt(env.RELAY_PRESENCE_TTL_SEC, DEFAULT_PRESENCE_TTL_SEC),
   };
 }
 
@@ -277,7 +280,12 @@ export class RelayRoom {
     const response = await this.service.fetch(request);
 
     const pathname = new URL(request.url).pathname;
-    if (pathname === '/api/v1/publish' || pathname === '/api/v1/inbox/ack') {
+    if (
+      pathname === '/api/v1/publish' ||
+      pathname === '/api/v1/inbox/ack' ||
+      pathname === '/api/v1/presence/heartbeat' ||
+      (pathname === '/api/v1/presence' && request.method === 'DELETE')
+    ) {
       await this.state.storage.put(SNAPSHOT_KEY, this.service.snapshot());
     }
     return response;

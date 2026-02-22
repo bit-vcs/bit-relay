@@ -2,6 +2,7 @@ import {
   createMemoryRelayService,
   DEFAULT_MAX_MESSAGES_PER_ROOM,
   DEFAULT_MAX_WS_SESSIONS,
+  DEFAULT_PRESENCE_TTL_SEC,
   DEFAULT_PUBLISH_LIMIT_PER_WINDOW,
   DEFAULT_PUBLISH_PAYLOAD_MAX_BYTES,
   DEFAULT_PUBLISH_WINDOW_MS,
@@ -81,6 +82,10 @@ function optionsFromEnv(): MemoryRelayOptions {
     maxNoncesPerSender: parsePositiveInt(
       Deno.env.get('RELAY_MAX_NONCES_PER_SENDER') ?? undefined,
       2048,
+    ),
+    presenceTtlSec: parsePositiveInt(
+      Deno.env.get('RELAY_PRESENCE_TTL_SEC') ?? undefined,
+      DEFAULT_PRESENCE_TTL_SEC,
     ),
   };
 }

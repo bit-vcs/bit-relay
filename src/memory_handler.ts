@@ -55,15 +55,31 @@ interface PublishAuthHeaders {
   nonce: string;
 }
 
+interface PresenceRecord {
+  participantId: string;
+  status: string;
+  metadata: JsonValue;
+  lastHeartbeat: number; // epoch seconds
+}
+
 interface RoomState {
   messages: Envelope[];
   acksByConsumer: Map<string, Set<string>>;
   sessions: Set<WebSocket>;
+  presenceByParticipant: Map<string, PresenceRecord>;
+}
+
+interface SnapshotPresenceRecord {
+  participant_id: string;
+  status: string;
+  metadata: JsonValue;
+  last_heartbeat: number;
 }
 
 interface SnapshotRoom {
   messages: Envelope[];
   acks_by_consumer: Record<string, string[]>;
+  presence?: SnapshotPresenceRecord[];
 }
 
 interface SnapshotKeyRecord {
@@ -93,6 +109,7 @@ export interface MemoryRelayOptions {
   maxClockSkewSec?: number;
   nonceTtlSec?: number;
   maxNoncesPerSender?: number;
+  presenceTtlSec?: number;
 }
 
 export interface MemoryRelayService {
@@ -102,6 +119,7 @@ export interface MemoryRelayService {
 }
 
 const DEFAULT_ROOM = 'main';
+const DEFAULT_PRESENCE_TTL_SEC = 60;
 const DEFAULT_MAX_MESSAGES_PER_ROOM = 1000;
 const DEFAULT_PUBLISH_PAYLOAD_MAX_BYTES = 64 * 1024;
 const DEFAULT_PUBLISH_LIMIT_PER_WINDOW = 30;
@@ -366,6 +384,7 @@ function createRoomState(): RoomState {
     messages: [],
     acksByConsumer: new Map(),
     sessions: new Set(),
+    presenceByParticipant: new Map(),
   };
 }
 
@@ -547,6 +566,40 @@ function broadcastPublish(
   }
 }
 
+function prunePresence(roomState: RoomState, nowSec: number, ttlSec: number): void {
+  for (const [id, record] of roomState.presenceByParticipant.entries()) {
+    if (nowSec - record.lastHeartbeat >= ttlSec) {
+      roomState.presenceByParticipant.delete(id);
+    }
+  }
+}
+
+function broadcastPresenceChange(
+  roomState: RoomState,
+  room: string,
+  participant: string,
+  status: string,
+  metadata: JsonValue,
+  event: string,
+): void {
+  const message = JSON.stringify({
+    type: 'presence',
+    room,
+    participant,
+    status,
+    metadata,
+    event,
+  });
+  for (const socket of roomState.sessions) {
+    if (socket.readyState !== WS_OPEN_STATE) continue;
+    try {
+      socket.send(message);
+    } catch {
+      roomState.sessions.delete(socket);
+    }
+  }
+}
+
 function nowEpochSec(): number {
   return Math.floor(Date.now() / 1000);
 }
@@ -588,6 +641,10 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
   const maxNoncesPerSender = Math.max(
     1,
     Math.trunc(options.maxNoncesPerSender ?? DEFAULT_MAX_NONCES_PER_SENDER),
+  );
+  const presenceTtlSec = Math.max(
+    1,
+    Math.trunc(options.presenceTtlSec ?? DEFAULT_PRESENCE_TTL_SEC),
   );
 
   const rooms = new Map<string, RoomState>();
@@ -1052,6 +1109,87 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
       return Response.json(result.body, { status: result.status });
     }
 
+    if (pathname === '/api/v1/presence/heartbeat') {
+      if (request.method !== 'POST') {
+        return methodNotAllowedResponse();
+      }
+      const room = normalizeRoom(url.searchParams.get('room'));
+      if (!isValidRoomName(room)) {
+        return invalidRoomResponse();
+      }
+      const participant = (url.searchParams.get('participant') ?? '').trim();
+      if (participant.length === 0) {
+        return toErrorResponse('missing query: participant', 400);
+      }
+      let status = 'online';
+      let metadata: JsonValue = null;
+      const contentType = (request.headers.get('content-type') ?? '').toLowerCase();
+      if (contentType.includes('application/json')) {
+        try {
+          const parsed = JSON.parse(await request.text());
+          if (isObjectRecord(parsed)) {
+            if (typeof parsed.status === 'string') {
+              status = parsed.status;
+            }
+            if (Object.prototype.hasOwnProperty.call(parsed, 'metadata') && isJsonValue(parsed.metadata)) {
+              metadata = parsed.metadata as JsonValue;
+            }
+          }
+        } catch {
+          return toErrorResponse('invalid json payload', 400);
+        }
+      }
+      const nowSec = nowEpochSec();
+      const roomState = getOrCreateRoomState(rooms, room);
+      const isNew = !roomState.presenceByParticipant.has(participant);
+      roomState.presenceByParticipant.set(participant, {
+        participantId: participant,
+        status,
+        metadata,
+        lastHeartbeat: nowSec,
+      });
+      broadcastPresenceChange(roomState, room, participant, status, metadata, isNew ? 'joined' : 'updated');
+      return Response.json({ ok: true, participant, status, event: isNew ? 'joined' : 'updated' }, { status: 200 });
+    }
+
+    if (pathname === '/api/v1/presence') {
+      const room = normalizeRoom(url.searchParams.get('room'));
+      if (!isValidRoomName(room)) {
+        return invalidRoomResponse();
+      }
+
+      if (request.method === 'GET') {
+        const nowSec = nowEpochSec();
+        const roomState = getOrCreateRoomState(rooms, room);
+        prunePresence(roomState, nowSec, presenceTtlSec);
+        const participants: JsonValue[] = [];
+        for (const record of roomState.presenceByParticipant.values()) {
+          participants.push({
+            participant_id: record.participantId,
+            status: record.status,
+            metadata: record.metadata,
+            last_heartbeat: record.lastHeartbeat,
+          });
+        }
+        return Response.json({ ok: true, room, participants }, { status: 200 });
+      }
+
+      if (request.method === 'DELETE') {
+        const participant = (url.searchParams.get('participant') ?? '').trim();
+        if (participant.length === 0) {
+          return toErrorResponse('missing query: participant', 400);
+        }
+        const roomState = getOrCreateRoomState(rooms, room);
+        const removed = roomState.presenceByParticipant.delete(participant);
+        if (removed) {
+          broadcastPresenceChange(roomState, room, participant, 'offline', null, 'left');
+        }
+        return Response.json({ ok: true, participant, removed }, { status: 200 });
+      }
+
+      return methodNotAllowedResponse();
+    }
+
     return notFoundResponse();
   }
 
@@ -1062,9 +1200,19 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
       for (const [consumer, ids] of roomState.acksByConsumer.entries()) {
         acks[consumer] = Array.from(ids.values());
       }
+      const presence: SnapshotPresenceRecord[] = [];
+      for (const record of roomState.presenceByParticipant.values()) {
+        presence.push({
+          participant_id: record.participantId,
+          status: record.status,
+          metadata: record.metadata,
+          last_heartbeat: record.lastHeartbeat,
+        });
+      }
       snapshotRooms[room] = {
         messages: JSON.parse(JSON.stringify(roomState.messages)) as Envelope[],
         acks_by_consumer: acks,
+        ...(presence.length > 0 ? { presence } : {}),
       };
     }
 
@@ -1155,6 +1303,24 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
             roomState.messages.length - maxMessagesPerRoom,
           );
         }
+
+        if (Array.isArray(value.presence)) {
+          const nowSec = nowEpochSec();
+          for (const p of value.presence) {
+            if (!isObjectRecord(p)) continue;
+            const pid = (typeof p.participant_id === 'string' ? p.participant_id : '').trim();
+            if (pid.length === 0) continue;
+            const lastHb = typeof p.last_heartbeat === 'number' ? Math.trunc(p.last_heartbeat) : 0;
+            if (nowSec - lastHb >= presenceTtlSec) continue;
+            roomState.presenceByParticipant.set(pid, {
+              participantId: pid,
+              status: typeof p.status === 'string' ? p.status : 'online',
+              metadata: isJsonValue(p.metadata) ? p.metadata as JsonValue : null,
+              lastHeartbeat: lastHb,
+            });
+          }
+        }
+
         rooms.set(room, roomState);
       }
     }
@@ -1217,6 +1383,7 @@ export {
   DEFAULT_MAX_NONCES_PER_SENDER,
   DEFAULT_MAX_WS_SESSIONS,
   DEFAULT_NONCE_TTL_SEC,
+  DEFAULT_PRESENCE_TTL_SEC,
   DEFAULT_PUBLISH_LIMIT_PER_WINDOW,
   DEFAULT_PUBLISH_PAYLOAD_MAX_BYTES,
   DEFAULT_PUBLISH_WINDOW_MS,
