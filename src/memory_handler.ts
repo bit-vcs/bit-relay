@@ -130,6 +130,7 @@ const DEFAULT_MAX_CLOCK_SKEW_SEC = 300;
 const DEFAULT_NONCE_TTL_SEC = 600;
 const DEFAULT_MAX_NONCES_PER_SENDER = 2048;
 const ROOM_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const TOPIC_PATTERN = /^[a-z][a-z0-9._-]{0,63}$/;
 const WS_OPEN_STATE = 1;
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
@@ -169,6 +170,10 @@ function normalizeRoom(raw: string | null): string {
 
 function isValidRoomName(room: string): boolean {
   return ROOM_NAME_PATTERN.test(room);
+}
+
+function isValidTopic(topic: string): boolean {
+  return TOPIC_PATTERN.test(topic);
 }
 
 function invalidRoomResponse(): Response {
@@ -406,10 +411,10 @@ function publishIntoRoom(
   payload: JsonValue,
   maxMessagesPerRoom: number,
 ): PublishResult {
-  if (topic !== 'notify') {
+  if (!isValidTopic(topic)) {
     return {
       status: 400,
-      body: { ok: false, error: `unsupported topic: ${topic}` },
+      body: { ok: false, error: `invalid topic: ${topic}` },
       changed: false,
       envelope: null,
     };
@@ -551,7 +556,7 @@ function broadcastPublish(
   cursor: number,
 ): void {
   const message = JSON.stringify({
-    type: 'notify',
+    type: envelope.topic,
     room,
     cursor,
     envelope: sanitizeEnvelope(envelope),
@@ -1403,6 +1408,7 @@ export {
   DEFAULT_ROOM,
   healthResponse,
   isValidRoomName,
+  isValidTopic,
   normalizeAuthToken,
   parseRoomTokens,
 };

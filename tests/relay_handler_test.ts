@@ -336,3 +336,110 @@ Deno.test('requires bearer token when auth token configured', async () => {
   );
   assertEquals(authorized.status, 200);
 });
+
+Deno.test('publish and poll with topic=issue', async () => {
+  const handler = createMemoryRelayHandler({ requireSignatures: false });
+
+  const publish = await handler(
+    new Request('http://relay.local/api/v1/publish?room=main&sender=bit&topic=issue&id=i1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ kind: 'issue.created', title: 'bug report' }),
+    }),
+  );
+  assertEquals(publish.status, 200);
+  assertObjectMatch(await publish.json(), { ok: true, accepted: true });
+
+  const poll = await handler(
+    new Request('http://relay.local/api/v1/poll?room=main&after=0&limit=10'),
+  );
+  assertEquals(poll.status, 200);
+  const body = await poll.json();
+  assertEquals(body.envelopes.length, 1);
+  assertObjectMatch(body.envelopes[0], {
+    topic: 'issue',
+    payload: { kind: 'issue.created', title: 'bug report' },
+  });
+});
+
+Deno.test('publish with dotted topic succeeds', async () => {
+  const handler = createMemoryRelayHandler({ requireSignatures: false });
+
+  const publish = await handler(
+    new Request(
+      'http://relay.local/api/v1/publish?room=main&sender=bit&topic=issue.created&id=d1',
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ title: 'test' }),
+      },
+    ),
+  );
+  assertEquals(publish.status, 200);
+  assertObjectMatch(await publish.json(), { ok: true, accepted: true });
+
+  const poll = await handler(
+    new Request('http://relay.local/api/v1/poll?room=main&after=0&limit=10'),
+  );
+  const body = await poll.json();
+  assertEquals(body.envelopes[0].topic, 'issue.created');
+});
+
+Deno.test('publish rejects invalid topic - empty string', async () => {
+  const handler = createMemoryRelayHandler({ requireSignatures: false });
+
+  const publish = await handler(
+    new Request('http://relay.local/api/v1/publish?room=main&sender=bit&topic=&id=e1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ data: 1 }),
+    }),
+  );
+  // empty topic falls back to 'notify' default
+  assertEquals(publish.status, 200);
+});
+
+Deno.test('publish rejects invalid topic - special characters', async () => {
+  const handler = createMemoryRelayHandler({ requireSignatures: false });
+
+  const publish = await handler(
+    new Request(
+      'http://relay.local/api/v1/publish?room=main&sender=bit&topic=foo%2Fbar&id=s1',
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ data: 1 }),
+      },
+    ),
+  );
+  assertEquals(publish.status, 400);
+  assertObjectMatch(await publish.json(), { ok: false, error: 'invalid topic: foo/bar' });
+});
+
+Deno.test('publish rejects invalid topic - starts with digit', async () => {
+  const handler = createMemoryRelayHandler({ requireSignatures: false });
+
+  const publish = await handler(
+    new Request('http://relay.local/api/v1/publish?room=main&sender=bit&topic=1abc&id=n1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ data: 1 }),
+    }),
+  );
+  assertEquals(publish.status, 400);
+  assertObjectMatch(await publish.json(), { ok: false, error: 'invalid topic: 1abc' });
+});
+
+Deno.test('publish rejects invalid topic - uppercase', async () => {
+  const handler = createMemoryRelayHandler({ requireSignatures: false });
+
+  const publish = await handler(
+    new Request('http://relay.local/api/v1/publish?room=main&sender=bit&topic=Notify&id=u1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ data: 1 }),
+    }),
+  );
+  assertEquals(publish.status, 400);
+  assertObjectMatch(await publish.json(), { ok: false, error: 'invalid topic: Notify' });
+});
