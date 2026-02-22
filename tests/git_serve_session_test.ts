@@ -1,5 +1,5 @@
 import { assert, assertEquals, assertObjectMatch } from '@std/assert';
-import { createGitServeSession } from '../src/git_serve_session.ts';
+import { createGitServeSession, DEFAULT_SESSION_TTL_MS } from '../src/git_serve_session.ts';
 
 async function registerSession(
   session: ReturnType<typeof createGitServeSession>,
@@ -405,6 +405,54 @@ Deno.test('info without session_token returns 403', async () => {
     await registerSession(session);
     const res = await session.fetch(new Request('http://do/info'));
     assertEquals(res.status, 403);
+  } finally {
+    session.cleanup();
+  }
+});
+
+// --- session TTL tests ---
+
+Deno.test('DEFAULT_SESSION_TTL_MS is 24 hours', () => {
+  assertEquals(DEFAULT_SESSION_TTL_MS, 24 * 60 * 60 * 1000);
+});
+
+Deno.test('session expires after custom TTL', async () => {
+  const session = createGitServeSession({ sessionTtlMs: 100 });
+  try {
+    const token = await registerSession(session);
+    assertEquals(session.state.active, true);
+
+    // Wait for TTL to expire
+    await new Promise((r) => setTimeout(r, 150));
+
+    assertEquals(session.state.active, false);
+
+    // Poll should return 404 (session not active)
+    const res = await session.fetch(
+      new Request(`http://do/poll?timeout=1&session_token=${token}`),
+    );
+    assertEquals(res.status, 404);
+    assertObjectMatch(await res.json(), { ok: false, error: 'session not active' });
+  } finally {
+    session.cleanup();
+  }
+});
+
+Deno.test('session stays active before TTL expires', async () => {
+  const session = createGitServeSession({ sessionTtlMs: 500 });
+  try {
+    const token = await registerSession(session);
+
+    // Wait less than TTL
+    await new Promise((r) => setTimeout(r, 50));
+
+    assertEquals(session.state.active, true);
+
+    const res = await session.fetch(
+      new Request(`http://do/poll?timeout=1&session_token=${token}`),
+    );
+    assertEquals(res.status, 200);
+    assertEquals((await res.json()).ok, true);
   } finally {
     session.cleanup();
   }

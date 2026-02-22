@@ -49,6 +49,7 @@ export interface RelayWorkerEnv {
   RELAY_NONCE_TTL_SEC?: string;
   RELAY_MAX_NONCES_PER_SENDER?: string;
   RELAY_PRESENCE_TTL_SEC?: string;
+  GIT_SERVE_SESSION_TTL_SEC?: string;
 }
 
 const SNAPSHOT_KEY = 'relay_snapshot_v1';

@@ -107,12 +107,20 @@ const host = Deno.env.get('HOST') ?? '127.0.0.1';
 const port = parsePositiveInt(Deno.env.get('PORT') ?? undefined, 8788);
 const service = createMemoryRelayService(optionsFromEnv());
 
+const gitServeSessionTtlSec = parsePositiveInt(
+  Deno.env.get('GIT_SERVE_SESSION_TTL_SEC') ?? undefined,
+  0,
+);
+const gitServeSessionOptions = gitServeSessionTtlSec > 0
+  ? { sessionTtlMs: gitServeSessionTtlSec * 1000 }
+  : undefined;
+
 const gitServeSessions = new Map<string, ReturnType<typeof createGitServeSession>>();
 
 function getOrCreateSession(sessionId: string): ReturnType<typeof createGitServeSession> {
   let session = gitServeSessions.get(sessionId);
   if (!session) {
-    session = createGitServeSession();
+    session = createGitServeSession(gitServeSessionOptions);
     gitServeSessions.set(sessionId, session);
   }
   return session;

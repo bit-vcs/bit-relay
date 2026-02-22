@@ -24,7 +24,11 @@ export interface GitServeSessionState {
 
 const REQUEST_TIMEOUT_MS = 60_000;
 const POLL_TIMEOUT_MS = 30_000;
-const SESSION_TTL_MS = 60 * 60 * 1000;
+export const DEFAULT_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+
+export interface GitServeSessionOptions {
+  sessionTtlMs?: number;
+}
 
 function generateRequestId(): string {
   return crypto.randomUUID();
@@ -63,13 +67,14 @@ export interface PersistableSessionState {
   registeredAt: number | null;
 }
 
-export function createGitServeSession(): {
+export function createGitServeSession(options?: GitServeSessionOptions): {
   state: GitServeSessionState;
   fetch: (request: Request) => Promise<Response>;
   cleanup: () => void;
   persistableState: () => PersistableSessionState;
   restore: (saved: PersistableSessionState) => void;
 } {
+  const sessionTtlMs = options?.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS;
   const state: GitServeSessionState = {
     active: false,
     sessionToken: '',
@@ -106,7 +111,7 @@ export function createGitServeSession(): {
     }
     sessionTimer = setTimeout(() => {
       cleanup();
-    }, SESSION_TTL_MS);
+    }, sessionTtlMs);
   }
 
   function handleRegister(): Response {
@@ -390,7 +395,14 @@ export class GitServeSession {
 
   // deno-lint-ignore no-explicit-any
   constructor(state?: any, _env?: any) {
-    this.session = createGitServeSession();
+    const sessionTtlMs = _env?.GIT_SERVE_SESSION_TTL_SEC
+      ? Number.parseInt(_env.GIT_SERVE_SESSION_TTL_SEC, 10) * 1000
+      : undefined;
+    this.session = createGitServeSession(
+      sessionTtlMs && Number.isFinite(sessionTtlMs) && sessionTtlMs > 0
+        ? { sessionTtlMs }
+        : undefined,
+    );
     this.storage = state?.storage ?? null;
 
     const restoreFromStorage = async () => {
