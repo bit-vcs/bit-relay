@@ -6,6 +6,7 @@ import {
   sha256Hex,
   verifyEd25519Signature,
 } from './signing.ts';
+import { fetchGitHubEd25519Keys, matchesGitHubKey } from './github_keys.ts';
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
@@ -46,6 +47,8 @@ interface KeyRecord {
   lastSeenAt: number;
   rotatedAt: number | null;
   revokedAt: number | null;
+  githubUsername: string | null;
+  githubVerifiedAt: number | null;
 }
 
 interface PublishAuthHeaders {
@@ -89,6 +92,8 @@ interface SnapshotKeyRecord {
   last_seen_at: number;
   rotated_at: number | null;
   revoked_at: number | null;
+  github_username: string | null;
+  github_verified_at: number | null;
 }
 
 export interface RelaySnapshot {
@@ -110,6 +115,7 @@ export interface MemoryRelayOptions {
   nonceTtlSec?: number;
   maxNoncesPerSender?: number;
   presenceTtlSec?: number;
+  fetchFn?: typeof globalThis.fetch;
 }
 
 export interface MemoryRelayService {
@@ -651,6 +657,7 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
     1,
     Math.trunc(options.presenceTtlSec ?? DEFAULT_PRESENCE_TTL_SEC),
   );
+  const fetchFn = options.fetchFn ?? globalThis.fetch;
 
   const rooms = new Map<string, RoomState>();
   const senderRateCounts = new Map<string, RateCounter>();
@@ -700,6 +707,8 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
         lastSeenAt: nowSec,
         rotatedAt: null,
         revokedAt: null,
+        githubUsername: null,
+        githubVerifiedAt: null,
       });
       return null;
     }
@@ -775,16 +784,21 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
     return { signature: auth.signature };
   }
 
+  function checkRoomToken(request: Request, room: string): Response | null {
+    const expected = roomTokens.get(room);
+    if (!expected) return null;
+    const provided = readRoomToken(request);
+    if (provided.length === 0 || !timingSafeEqual(provided, expected)) {
+      return toErrorResponse('forbidden', 403);
+    }
+    return null;
+  }
+
   function handleWebSocket(request: Request, room: string): Response {
     const roomState = getOrCreateRoomState(rooms, room);
 
-    const expectedRoomToken = roomTokens.get(room);
-    if (expectedRoomToken) {
-      const provided = readRoomToken(request);
-      if (provided.length === 0 || !timingSafeEqual(provided, expectedRoomToken)) {
-        return toErrorResponse('forbidden', 403);
-      }
-    }
+    const roomTokenError = checkRoomToken(request, room);
+    if (roomTokenError) return roomTokenError;
 
     if (roomState.sessions.size >= maxWsSessions) {
       return toErrorResponse('too many connections', 503);
@@ -844,6 +858,8 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
           last_seen_at: record.lastSeenAt,
           rotated_at: record.rotatedAt,
           revoked_at: record.revokedAt,
+          github_username: record.githubUsername,
+          github_verified_at: record.githubVerifiedAt,
         },
       },
       { status: 200 },
@@ -931,6 +947,8 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
     record.publicKey = newPublicKey;
     record.rotatedAt = nowSec;
     record.lastSeenAt = nowSec;
+    record.githubUsername = null;
+    record.githubVerifiedAt = null;
     rememberNonce(sender, nonce, ts, nowSec);
 
     return Response.json(
@@ -939,6 +957,79 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
         sender,
         public_key: newPublicKey,
         rotated_at: nowSec,
+      },
+      { status: 200 },
+    );
+  }
+
+  async function handleKeyVerifyGitHub(request: Request): Promise<Response> {
+    if (request.method !== 'POST') {
+      return methodNotAllowedResponse();
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(await request.text());
+    } catch {
+      return toErrorResponse('invalid json payload', 400);
+    }
+    if (!isObjectRecord(parsed)) {
+      return toErrorResponse('invalid json payload', 400);
+    }
+
+    const sender = (typeof parsed.sender === 'string' ? parsed.sender : '').trim();
+    const githubUsername = (typeof parsed.github_username === 'string'
+      ? parsed.github_username
+      : '').trim();
+
+    if (sender.length === 0) {
+      return toErrorResponse('missing field: sender', 400);
+    }
+    if (githubUsername.length === 0) {
+      return toErrorResponse('missing field: github_username', 400);
+    }
+    if (sender !== githubUsername) {
+      return toErrorResponse('sender must match github_username', 400);
+    }
+
+    const record = keyRegistry.get(sender);
+    if (!record) {
+      return toErrorResponse('sender key not found', 404);
+    }
+
+    const fetchResult = await fetchGitHubEd25519Keys(githubUsername, fetchFn);
+    if (!fetchResult.ok) {
+      return toErrorResponse(
+        `github key fetch failed: ${fetchResult.error}`,
+        502,
+      );
+    }
+
+    const matched = matchesGitHubKey(record.publicKey, fetchResult.keys);
+    if (!matched) {
+      return Response.json(
+        {
+          ok: false,
+          verified: false,
+          error: 'key not found in github keys',
+          sender,
+          github_username: githubUsername,
+        },
+        { status: 200 },
+      );
+    }
+
+    const nowSec = nowEpochSec();
+    record.githubUsername = githubUsername;
+    record.githubVerifiedAt = nowSec;
+
+    return Response.json(
+      {
+        ok: true,
+        verified: true,
+        sender,
+        github_username: githubUsername,
+        github_verified_at: nowSec,
       },
       { status: 200 },
     );
@@ -969,6 +1060,10 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
       return handleKeyRotate(request);
     }
 
+    if (pathname === '/api/v1/key/verify-github') {
+      return handleKeyVerifyGitHub(request);
+    }
+
     if (pathname === '/ws') {
       const room = normalizeRoom(url.searchParams.get('room'));
       if (!isValidRoomName(room)) {
@@ -991,6 +1086,8 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
       if (!isValidRoomName(room)) {
         return invalidRoomResponse();
       }
+      const publishRoomTokenError = checkRoomToken(request, room);
+      if (publishRoomTokenError) return publishRoomTokenError;
       const topic = (url.searchParams.get('topic') ?? 'notify').trim() || 'notify';
       const id = (url.searchParams.get('id') ?? crypto.randomUUID()).trim() || crypto.randomUUID();
       const signatureFromQuery = (url.searchParams.get('sig') ?? '').trim();
@@ -1073,6 +1170,8 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
       if (!isValidRoomName(room)) {
         return invalidRoomResponse();
       }
+      const pollRoomTokenError = checkRoomToken(request, room);
+      if (pollRoomTokenError) return pollRoomTokenError;
       const after = normalizeAfter(url.searchParams.get('after'), 0);
       const limit = normalizeLimit(url.searchParams.get('limit'), 100);
       const roomState = getOrCreateRoomState(rooms, room);
@@ -1087,6 +1186,8 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
       if (!isValidRoomName(room)) {
         return invalidRoomResponse();
       }
+      const inboxPendingRoomTokenError = checkRoomToken(request, room);
+      if (inboxPendingRoomTokenError) return inboxPendingRoomTokenError;
       const consumer = (url.searchParams.get('consumer') ?? '').trim();
       if (consumer.length === 0) {
         return toErrorResponse('missing query: consumer', 400);
@@ -1104,6 +1205,8 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
       if (!isValidRoomName(room)) {
         return invalidRoomResponse();
       }
+      const ackRoomTokenError = checkRoomToken(request, room);
+      if (ackRoomTokenError) return ackRoomTokenError;
       const consumer = (url.searchParams.get('consumer') ?? '').trim();
       if (consumer.length === 0) {
         return toErrorResponse('missing query: consumer', 400);
@@ -1122,6 +1225,8 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
       if (!isValidRoomName(room)) {
         return invalidRoomResponse();
       }
+      const heartbeatRoomTokenError = checkRoomToken(request, room);
+      if (heartbeatRoomTokenError) return heartbeatRoomTokenError;
       const participant = (url.searchParams.get('participant') ?? '').trim();
       if (participant.length === 0) {
         return toErrorResponse('missing query: participant', 400);
@@ -1174,6 +1279,8 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
       if (!isValidRoomName(room)) {
         return invalidRoomResponse();
       }
+      const presenceRoomTokenError = checkRoomToken(request, room);
+      if (presenceRoomTokenError) return presenceRoomTokenError;
 
       if (request.method === 'GET') {
         const nowSec = nowEpochSec();
@@ -1242,6 +1349,8 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
         last_seen_at: key.lastSeenAt,
         rotated_at: key.rotatedAt,
         revoked_at: key.revokedAt,
+        github_username: key.githubUsername,
+        github_verified_at: key.githubVerifiedAt,
       };
     }
 
@@ -1357,6 +1466,10 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
           lastSeenAt: typeof value.last_seen_at === 'number' ? Math.trunc(value.last_seen_at) : 0,
           rotatedAt: typeof value.rotated_at === 'number' ? Math.trunc(value.rotated_at) : null,
           revokedAt: typeof value.revoked_at === 'number' ? Math.trunc(value.revoked_at) : null,
+          githubUsername: typeof value.github_username === 'string' ? value.github_username : null,
+          githubVerifiedAt: typeof value.github_verified_at === 'number'
+            ? Math.trunc(value.github_verified_at)
+            : null,
         });
       }
     }

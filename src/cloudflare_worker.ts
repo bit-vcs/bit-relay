@@ -289,6 +289,8 @@ export class RelayRoom {
       pathname === '/api/v1/publish' ||
       pathname === '/api/v1/inbox/ack' ||
       pathname === '/api/v1/presence/heartbeat' ||
+      pathname === '/api/v1/key/rotate' ||
+      pathname === '/api/v1/key/verify-github' ||
       (pathname === '/api/v1/presence' && request.method === 'DELETE')
     ) {
       await this.state.storage.put(SNAPSHOT_KEY, this.service.snapshot());
