@@ -57,10 +57,18 @@ function fromBase64(b64: string): Uint8Array {
   return bytes;
 }
 
+export interface PersistableSessionState {
+  active: boolean;
+  sessionToken: string;
+  registeredAt: number | null;
+}
+
 export function createGitServeSession(): {
   state: GitServeSessionState;
   fetch: (request: Request) => Promise<Response>;
   cleanup: () => void;
+  persistableState: () => PersistableSessionState;
+  restore: (saved: PersistableSessionState) => void;
 } {
   const state: GitServeSessionState = {
     active: false,
@@ -351,18 +359,72 @@ export function createGitServeSession(): {
     return Response.json({ ok: false, error: 'not found' }, { status: 404 });
   }
 
-  return { state, fetch, cleanup };
-}
-
-export class GitServeSession {
-  private session: ReturnType<typeof createGitServeSession>;
-
-  constructor() {
-    this.session = createGitServeSession();
+  function persistableState(): PersistableSessionState {
+    return {
+      active: state.active,
+      sessionToken: state.sessionToken,
+      registeredAt: state.registeredAt,
+    };
   }
 
-  // deno-lint-ignore require-await
+  function restore(saved: PersistableSessionState): void {
+    state.active = saved.active;
+    state.sessionToken = saved.sessionToken;
+    state.registeredAt = saved.registeredAt;
+    if (state.active) {
+      resetSessionTimer();
+    }
+  }
+
+  return { state, fetch, cleanup, persistableState, restore };
+}
+
+// Durable Object class used by Cloudflare Workers.
+// Accepts a state object with storage for persistence.
+// Also works without storage (e.g. in tests / Deno).
+export class GitServeSession {
+  private session: ReturnType<typeof createGitServeSession>;
+  // deno-lint-ignore no-explicit-any
+  private storage: any;
+  private ready: Promise<void>;
+
+  // deno-lint-ignore no-explicit-any
+  constructor(state?: any, _env?: any) {
+    this.session = createGitServeSession();
+    this.storage = state?.storage ?? null;
+
+    const restoreFromStorage = async () => {
+      if (!this.storage) return;
+      const saved = await this.storage.get('session_state');
+      if (saved && typeof saved === 'object') {
+        this.session.restore(saved as PersistableSessionState);
+      }
+    };
+
+    if (state && typeof state.blockConcurrencyWhile === 'function') {
+      this.ready = state.blockConcurrencyWhile(restoreFromStorage);
+    } else {
+      this.ready = restoreFromStorage();
+    }
+  }
+
+  private async persist(): Promise<void> {
+    if (!this.storage) return;
+    await this.storage.put('session_state', this.session.persistableState());
+  }
+
   async fetch(request: Request): Promise<Response> {
-    return this.session.fetch(request);
+    await this.ready;
+    const url = new URL(request.url);
+    const path = url.pathname;
+
+    const response = await this.session.fetch(request);
+
+    // Persist state after register or cleanup-triggering operations
+    if (path === '/register' && request.method === 'POST') {
+      await this.persist();
+    }
+
+    return response;
   }
 }
