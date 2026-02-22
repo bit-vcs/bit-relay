@@ -144,9 +144,9 @@ function getGitServeSessionStub(
 
 function extractSessionToken(request: Request): string {
   const url = new URL(request.url);
-  return url.searchParams.get('session_token')
-    ?? request.headers.get('x-session-token')
-    ?? '';
+  return url.searchParams.get('session_token') ??
+    request.headers.get('x-session-token') ??
+    '';
 }
 
 function handleServeRoute(
@@ -196,7 +196,11 @@ function handleServeRoute(
     const timeout = url.searchParams.get('timeout') ?? '30';
     const token = extractSessionToken(request);
     return stub.fetch(
-      new Request(`http://do/poll?timeout=${encodeURIComponent(timeout)}&session_token=${encodeURIComponent(token)}`),
+      new Request(
+        `http://do/poll?timeout=${encodeURIComponent(timeout)}&session_token=${
+          encodeURIComponent(token)
+        }`,
+      ),
     );
   }
 

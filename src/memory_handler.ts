@@ -1131,7 +1131,10 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
             if (typeof parsed.status === 'string') {
               status = parsed.status;
             }
-            if (Object.prototype.hasOwnProperty.call(parsed, 'metadata') && isJsonValue(parsed.metadata)) {
+            if (
+              Object.prototype.hasOwnProperty.call(parsed, 'metadata') &&
+              isJsonValue(parsed.metadata)
+            ) {
               metadata = parsed.metadata as JsonValue;
             }
           }
@@ -1148,8 +1151,17 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
         metadata,
         lastHeartbeat: nowSec,
       });
-      broadcastPresenceChange(roomState, room, participant, status, metadata, isNew ? 'joined' : 'updated');
-      return Response.json({ ok: true, participant, status, event: isNew ? 'joined' : 'updated' }, { status: 200 });
+      broadcastPresenceChange(
+        roomState,
+        room,
+        participant,
+        status,
+        metadata,
+        isNew ? 'joined' : 'updated',
+      );
+      return Response.json({ ok: true, participant, status, event: isNew ? 'joined' : 'updated' }, {
+        status: 200,
+      });
     }
 
     if (pathname === '/api/v1/presence') {

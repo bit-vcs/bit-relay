@@ -266,7 +266,11 @@ Deno.test('chain relay: A→B→C→D→E multi-hop propagation', async () => {
       // Receiver fetches data from the source through relay
       const sourceSessionId = payload.session_id as string;
       const sourceToken = payload.session_token as string;
-      const sourceNode = { ...currentSource, sessionId: sourceSessionId, sessionToken: sourceToken };
+      const sourceNode = {
+        ...currentSource,
+        sessionId: sourceSessionId,
+        sessionToken: sourceToken,
+      };
 
       const fetchedData = await gitCloneThroughRelay(
         relay.baseUrl,
@@ -276,12 +280,18 @@ Deno.test('chain relay: A→B→C→D→E multi-hop propagation', async () => {
       assertEquals(fetchedData, currentPayload);
 
       // Receiver re-broadcasts with its own session info
-      await publish(relay.baseUrl, hop.room_out, hop.receiver.name, `broadcast-${hop.receiver.name}`, {
-        type: 'feature-broadcast',
-        session_id: hop.receiver.sessionId,
-        session_token: hop.receiver.sessionToken,
-        data_ref: fetchedData,
-      });
+      await publish(
+        relay.baseUrl,
+        hop.room_out,
+        hop.receiver.name,
+        `broadcast-${hop.receiver.name}`,
+        {
+          type: 'feature-broadcast',
+          session_id: hop.receiver.sessionId,
+          session_token: hop.receiver.sessionToken,
+          data_ref: fetchedData,
+        },
+      );
 
       currentSource = hop.receiver;
       currentPayload = fetchedData;
@@ -587,7 +597,11 @@ Deno.test('chain break: removing intermediate node stops propagation', async () 
 
     // C checks hop-B — still only has round 1's message
     const cAfterBreak = await poll(relay.baseUrl, 'hop-B', cReceived.next_cursor);
-    assertEquals(cAfterBreak.envelopes.length, 0, 'C should not receive round 2 without B relaying');
+    assertEquals(
+      cAfterBreak.envelopes.length,
+      0,
+      'C should not receive round 2 without B relaying',
+    );
 
     // A's broadcast IS in hop-A (relay stored it)
     const hopACheck = await poll(relay.baseUrl, 'hop-A', round1.next_cursor);

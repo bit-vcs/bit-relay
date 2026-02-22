@@ -179,7 +179,10 @@ Deno.test('e2e: 5 nodes publish and poll messages in shared room', async () => {
 
     // Verify each message payload
     for (const env of pollBody.envelopes) {
-      assertEquals((env as Record<string, Record<string, unknown>>).payload.type, 'feature-broadcast');
+      assertEquals(
+        (env as Record<string, Record<string, unknown>>).payload.type,
+        'feature-broadcast',
+      );
     }
   } finally {
     await relay.shutdown();
@@ -231,21 +234,27 @@ Deno.test('e2e: session tokens are isolated - cross-node access denied', async (
 
         // poll
         const pollRes = await fetch(
-          `${relay.baseUrl}/api/v1/serve/poll?session=${nodes[target].sessionId}&timeout=1&session_token=${nodes[attacker].sessionToken}`,
+          `${relay.baseUrl}/api/v1/serve/poll?session=${
+            nodes[target].sessionId
+          }&timeout=1&session_token=${nodes[attacker].sessionToken}`,
         );
         assertEquals(pollRes.status, 403, `node-${attacker} should not access node-${target} poll`);
         await pollRes.json(); // drain body
 
         // info
         const infoRes = await fetch(
-          `${relay.baseUrl}/api/v1/serve/info?session=${nodes[target].sessionId}&session_token=${nodes[attacker].sessionToken}`,
+          `${relay.baseUrl}/api/v1/serve/info?session=${nodes[target].sessionId}&session_token=${
+            nodes[attacker].sessionToken
+          }`,
         );
         assertEquals(infoRes.status, 403, `node-${attacker} should not access node-${target} info`);
         await infoRes.json();
 
         // git request
         const gitRes = await fetch(
-          `${relay.baseUrl}/git/${nodes[target].sessionId}/info/refs?service=git-upload-pack&session_token=${nodes[attacker].sessionToken}`,
+          `${relay.baseUrl}/git/${
+            nodes[target].sessionId
+          }/info/refs?service=git-upload-pack&session_token=${nodes[attacker].sessionToken}`,
         );
         assertEquals(gitRes.status, 403, `node-${attacker} should not access node-${target} git`);
         await gitRes.json();
@@ -420,14 +429,18 @@ Deno.test('e2e: broadcast triggers cross-node fetch (5 nodes)', async () => {
 
     // Node 1 simulates auto-fetch: makes git clone request to Node 0's session
     const gitPromise = fetch(
-      `${relay.baseUrl}/git/${nodes[0].sessionId}/info/refs?service=git-upload-pack&session_token=${nodes[0].sessionToken}`,
+      `${relay.baseUrl}/git/${nodes[0].sessionId}/info/refs?service=git-upload-pack&session_token=${
+        nodes[0].sessionToken
+      }`,
     );
 
     await new Promise((r) => setTimeout(r, 50));
 
     // Node 0 polls and handles the git request
     const servePoll = await fetch(
-      `${relay.baseUrl}/api/v1/serve/poll?session=${nodes[0].sessionId}&timeout=2&session_token=${nodes[0].sessionToken}`,
+      `${relay.baseUrl}/api/v1/serve/poll?session=${nodes[0].sessionId}&timeout=2&session_token=${
+        nodes[0].sessionToken
+      }`,
     );
     const servePollBody = await servePoll.json();
     assertEquals(servePollBody.requests.length, 1);
@@ -435,7 +448,9 @@ Deno.test('e2e: broadcast triggers cross-node fetch (5 nodes)', async () => {
     // Node 0 responds with fake packfile
     const fakePack = 'PACK\x00\x00\x00\x02\x00\x00\x00\x00';
     const respondRes = await fetch(
-      `${relay.baseUrl}/api/v1/serve/respond?session=${nodes[0].sessionId}&session_token=${nodes[0].sessionToken}`,
+      `${relay.baseUrl}/api/v1/serve/respond?session=${nodes[0].sessionId}&session_token=${
+        nodes[0].sessionToken
+      }`,
       {
         method: 'POST',
         headers: { 'content-type': 'application/json' },

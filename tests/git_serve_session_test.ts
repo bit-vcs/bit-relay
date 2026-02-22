@@ -167,7 +167,10 @@ Deno.test('respond with invalid request_id returns 404', async () => {
       }),
     );
     assertEquals(res.status, 404);
-    assertObjectMatch(await res.json(), { ok: false, error: 'request not found or already resolved' });
+    assertObjectMatch(await res.json(), {
+      ok: false,
+      error: 'request not found or already resolved',
+    });
   } finally {
     session.cleanup();
   }

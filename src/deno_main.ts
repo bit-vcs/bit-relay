@@ -120,9 +120,9 @@ function getOrCreateSession(sessionId: string): ReturnType<typeof createGitServe
 
 function extractSessionToken(request: Request): string {
   const url = new URL(request.url);
-  return url.searchParams.get('session_token')
-    ?? request.headers.get('x-session-token')
-    ?? '';
+  return url.searchParams.get('session_token') ??
+    request.headers.get('x-session-token') ??
+    '';
 }
 
 async function handleRequest(request: Request): Promise<Response> {

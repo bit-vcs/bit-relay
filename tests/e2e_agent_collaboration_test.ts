@@ -68,7 +68,12 @@ async function poll(
   relay: ReturnType<typeof createRelay>,
   room: string,
   after = 0,
-): Promise<{ next_cursor: number; envelopes: Array<{ id: string; sender: string; payload: ProtocolMessage }> }> {
+): Promise<
+  {
+    next_cursor: number;
+    envelopes: Array<{ id: string; sender: string; payload: ProtocolMessage }>;
+  }
+> {
   const res = await relay.fetch(
     new Request(`${BASE}/api/v1/poll?room=${room}&after=${after}`, { method: 'GET' }),
   );
@@ -106,13 +111,16 @@ async function getPresence(
   return body.participants;
 }
 
+// deno-lint-ignore no-unused-vars
 async function deletePresence(
   relay: ReturnType<typeof createRelay>,
   room: string,
   participant: string,
 ) {
   const res = await relay.fetch(
-    new Request(`${BASE}/api/v1/presence?room=${room}&participant=${participant}`, { method: 'DELETE' }),
+    new Request(`${BASE}/api/v1/presence?room=${room}&participant=${participant}`, {
+      method: 'DELETE',
+    }),
   );
   assertEquals(res.status, 200);
   return await res.json();
@@ -187,13 +195,22 @@ Deno.test('claim/release coordination — 5 agents', async () => {
 
   // Agents C, D, E claim their own files
   await publish(relay, room, agents[2], {
-    type: 'claim', agent: agents[2], files: ['src/api.ts'], expiry,
+    type: 'claim',
+    agent: agents[2],
+    files: ['src/api.ts'],
+    expiry,
   });
   await publish(relay, room, agents[3], {
-    type: 'claim', agent: agents[3], files: ['src/db.ts'], expiry,
+    type: 'claim',
+    agent: agents[3],
+    files: ['src/db.ts'],
+    expiry,
   });
   await publish(relay, room, agents[4], {
-    type: 'claim', agent: agents[4], files: ['tests/auth_test.ts'], expiry,
+    type: 'claim',
+    agent: agents[4],
+    files: ['tests/auth_test.ts'],
+    expiry,
   });
 
   // Agent A releases its claims
@@ -233,7 +250,7 @@ Deno.test('ordered broadcast with causal chain', async () => {
   assertEquals(aBroadcast.base_ref, 'abc123');
 
   // Agent B fast-forwards (incorporates A's changes) and broadcasts its own work
-  const broadcastB = await publish(relay, room, 'agent-B', {
+  const _broadcastB = await publish(relay, room, 'agent-B', {
     type: 'broadcast',
     agent: 'agent-B',
     base_ref: 'def456', // starts from A's head
@@ -357,22 +374,30 @@ Deno.test('5 agents full scenario — presence + claim + broadcast + follow', as
 
   // Phase 1: claim files
   await publish(relay, room, 'agent-A', {
-    type: 'claim', agent: 'agent-A',
-    files: ['src/auth.ts', 'src/session.ts'], expiry,
+    type: 'claim',
+    agent: 'agent-A',
+    files: ['src/auth.ts', 'src/session.ts'],
+    expiry,
   });
   await publish(relay, room, 'agent-B', {
-    type: 'claim', agent: 'agent-B',
-    files: ['src/api.ts', 'src/routes.ts'], expiry,
+    type: 'claim',
+    agent: 'agent-B',
+    files: ['src/api.ts', 'src/routes.ts'],
+    expiry,
   });
   await publish(relay, room, 'agent-C', {
-    type: 'claim', agent: 'agent-C',
-    files: ['src/db.ts', 'src/models.ts'], expiry,
+    type: 'claim',
+    agent: 'agent-C',
+    files: ['src/db.ts', 'src/models.ts'],
+    expiry,
   });
 
   // Phase 2: develop and broadcast
   const bcastA = await publish(relay, room, 'agent-A', {
-    type: 'broadcast', agent: 'agent-A',
-    base_ref: 'main-000', head_ref: 'feat-auth-001',
+    type: 'broadcast',
+    agent: 'agent-A',
+    base_ref: 'main-000',
+    head_ref: 'feat-auth-001',
     parent_broadcasts: [],
     files_changed: ['src/auth.ts', 'src/session.ts'],
   });
@@ -386,16 +411,19 @@ Deno.test('5 agents full scenario — presence + claim + broadcast + follow', as
   assertEquals((lastBroadcast.payload as BroadcastMessage).agent, 'agent-A');
 
   // Agent B broadcasts (builds on A)
-  const bcastB = await publish(relay, room, 'agent-B', {
-    type: 'broadcast', agent: 'agent-B',
-    base_ref: 'feat-auth-001', head_ref: 'feat-api-002',
+  const _bcastB = await publish(relay, room, 'agent-B', {
+    type: 'broadcast',
+    agent: 'agent-B',
+    base_ref: 'feat-auth-001',
+    head_ref: 'feat-api-002',
     parent_broadcasts: [bcastA.id],
     files_changed: ['src/api.ts', 'src/routes.ts'],
   });
 
   // Agent A releases claims
   await publish(relay, room, 'agent-A', {
-    type: 'release', agent: 'agent-A',
+    type: 'release',
+    agent: 'agent-A',
     files: ['src/auth.ts', 'src/session.ts'],
   });
 

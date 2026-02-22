@@ -117,8 +117,7 @@ export function createGitServeSession(): {
       );
     }
     const url = new URL(request.url);
-    const token =
-      url.searchParams.get('session_token') ??
+    const token = url.searchParams.get('session_token') ??
       request.headers.get('x-session-token') ??
       '';
     if (token !== state.sessionToken) {
