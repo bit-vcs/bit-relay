@@ -153,8 +153,12 @@ export function createGitServeSession(): {
   }
 
   async function handleGitRequest(request: Request, gitPath: string): Promise<Response> {
-    const denied = validateToken(request);
-    if (denied) return denied;
+    if (!state.active) {
+      return Response.json(
+        { ok: false, error: 'session not active' },
+        { status: 404 },
+      );
+    }
 
     const requestId = generateRequestId();
     let bodyBase64: string | null = null;

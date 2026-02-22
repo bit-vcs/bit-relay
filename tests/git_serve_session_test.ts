@@ -361,14 +361,22 @@ Deno.test('session_token via x-session-token header works', async () => {
   }
 });
 
-Deno.test('git request without session_token returns 403', async () => {
+Deno.test('git request without session_token is allowed', async () => {
   const session = createGitServeSession();
   try {
-    await registerSession(session);
+    const token = await registerSession(session);
+    // git requests don't require session_token (clone clients don't have it)
+    // Start a poll to consume the request
+    const pollP = session.fetch(
+      new Request(`http://do/poll?timeout=2&session_token=${token}`),
+    );
     const res = await session.fetch(
       new Request('http://do/git/info/refs?service=git-upload-pack'),
     );
-    assertEquals(res.status, 403);
+    // The request should be accepted (pending response from serve side)
+    // We don't need to fully complete the flow, just verify it's not 403
+    assertEquals(res.status !== 403, true);
+    await pollP;
   } finally {
     session.cleanup();
   }

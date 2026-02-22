@@ -250,14 +250,7 @@ Deno.test('e2e: session tokens are isolated - cross-node access denied', async (
         assertEquals(infoRes.status, 403, `node-${attacker} should not access node-${target} info`);
         await infoRes.json();
 
-        // git request
-        const gitRes = await fetch(
-          `${relay.baseUrl}/git/${
-            nodes[target].sessionId
-          }/info/refs?service=git-upload-pack&session_token=${nodes[attacker].sessionToken}`,
-        );
-        assertEquals(gitRes.status, 403, `node-${attacker} should not access node-${target} git`);
-        await gitRes.json();
+        // git requests are open (clone clients don't have session_token)
       }
     }
   } finally {
@@ -478,21 +471,21 @@ Deno.test('e2e: broadcast triggers cross-node fetch (5 nodes)', async () => {
   }
 });
 
-Deno.test('e2e: no token → git request returns 403', async () => {
+Deno.test('e2e: no token → poll/respond returns 403, git request allowed', async () => {
   const relay = startRelay();
   try {
     const node = await registerNode(relay.baseUrl, 'server');
 
-    // Request without token
+    // Poll without token → 403
     const res1 = await fetch(
-      `${relay.baseUrl}/git/${node.sessionId}/info/refs?service=git-upload-pack`,
+      `${relay.baseUrl}/api/v1/serve/poll?session=${node.sessionId}&timeout=1`,
     );
     assertEquals(res1.status, 403);
     await res1.json();
 
-    // Request with wrong token
+    // Poll with wrong token → 403
     const res2 = await fetch(
-      `${relay.baseUrl}/git/${node.sessionId}/info/refs?service=git-upload-pack&session_token=bad`,
+      `${relay.baseUrl}/api/v1/serve/poll?session=${node.sessionId}&timeout=1&session_token=bad`,
     );
     assertEquals(res2.status, 403);
     await res2.json();
