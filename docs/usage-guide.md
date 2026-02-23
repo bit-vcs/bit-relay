@@ -7,10 +7,10 @@ familiarity with Git.
 
 ```bash
 # Shell script (Mac/Linux)
-curl -fsSL https://raw.githubusercontent.com/mizchi/bit-vcs/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/bit-vcs/bit/main/install.sh | bash
 
 # MoonBit package manager
-moon install mizchi/bit/cmd/bit
+moon install bit-vcs/bit/cmd/bit
 ```
 
 ```bash
