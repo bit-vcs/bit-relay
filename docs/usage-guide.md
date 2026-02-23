@@ -1,6 +1,60 @@
 # bit-relay Usage Guide
 
-A step-by-step guide to sharing repositories, managing issues, and collaborating through bit-relay. This guide assumes familiarity with Git.
+A guide to sharing repositories, managing issues, and collaborating through bit-relay. Assumes familiarity with Git.
+
+## Install
+
+```bash
+# Shell script (Mac/Linux)
+curl -fsSL https://raw.githubusercontent.com/mizchi/bit-vcs/main/install.sh | bash
+
+# MoonBit package manager
+moon install mizchi/bit/cmd/bit
+```
+
+```bash
+bit --version
+```
+
+## Quick Start
+
+### Create a repo and share issues
+
+```bash
+# Create a repository
+mkdir my-project && cd my-project
+bit init
+echo "# My Project" > README.md
+bit add . && bit commit -m "initial commit"
+
+# Initialize issue tracking
+bit issue init
+
+# Create an issue
+bit issue create -t "Login page crashes on special characters" -b "Crash on special char input"
+
+# Push issues to relay
+bit relay sync push relay+https://bit-relay.mizchi.workers.dev
+```
+
+### Serve the repo via relay
+
+```bash
+bit relay serve relay+https://bit-relay.mizchi.workers.dev
+# => Clone URL: relay+https://bit-relay.mizchi.workers.dev/AbCdEfGh
+```
+
+### The other side clones and fetches issues
+
+```bash
+bit clone relay+https://bit-relay.mizchi.workers.dev/AbCdEfGh
+cd AbCdEfGh
+bit issue init
+bit relay sync fetch relay+https://bit-relay.mizchi.workers.dev
+bit issue list
+```
+
+That's it — repositories and issues shared without GitHub.
 
 ## Why bit
 
@@ -26,25 +80,23 @@ If this concept resonates with you, reach out at https://x.com/mizchi.
 
 ## Key Concepts
 
-bit extends Git with platform-independent collaboration features. Before diving into the workflow, here are the concepts that differ from a typical Git + GitHub setup.
-
 ### bit — Git Implementation
 
-bit is a Git implementation written in MoonBit. It is compatible with Git except for a few unsupported features (e.g., `--object-hash=sha256`). Existing Git repositories can be used with bit as-is, and vice versa.
+bit is a Git implementation written in MoonBit. Compatible with Git except for a few unsupported features (e.g., `--object-hash=sha256`). Existing Git repositories work with bit as-is, and vice versa.
 
 ### hub — Decentralized Issue/PR Management
 
-In a GitHub workflow, issues and pull requests live on the GitHub server. In bit, they are stored **inside the repository itself** as Git notes (`refs/notes/bit-hub`). This means:
+In GitHub, issues and PRs live on the GitHub server. In bit, they are stored **inside the repository** as Git notes (`refs/notes/bit-hub`).
 
-- Issues and PRs are part of the repository data, not tied to any hosting platform
-- They can be synced between peers without a central server
-- `bit issue init` initializes this metadata store in any git repository
+- Issues/PRs become part of the repository data, not tied to any hosting platform
+- Can be synced between peers without a central server
+- `bit issue init` initializes the metadata store in any git repository
 
 ### relay — Relay Server for Sharing
 
 bit-relay is a lightweight relay server that solves two problems:
 
-1. **Repository sharing across NAT/firewalls**: `bit relay serve` exposes a local repository through the relay, and others can `bit clone` from it — no port forwarding needed
+1. **Repository sharing across NAT/firewalls**: `bit relay serve` exposes a local repository through the relay. Others can `bit clone` from it — no port forwarding needed
 2. **Hub metadata sync**: `bit relay sync push/fetch` publishes and retrieves issues/PRs through the relay
 
 ```
@@ -57,7 +109,7 @@ bit-relay is a lightweight relay server that solves two problems:
 
 Code (blobs/trees/commits) transfers via `serve`/`clone`. Hub metadata (issues/PRs) transfers via `sync push`/`sync fetch`. These are independent operations.
 
-By default, the relay URL points to the public instance deployed from this project (`bit-relay.mizchi.workers.dev`). You can also deploy your own — see [Hosting bit-relay](./host-bit-relay.md) for details.
+The default relay is the public instance deployed from this project (`bit-relay.mizchi.workers.dev`). You can also deploy your own — see [Hosting bit-relay](./host-bit-relay.md).
 
 ### sender — Your Identity
 
@@ -65,43 +117,20 @@ A `sender` is your identifier on the relay (e.g., `alice`). Combined with an Ed2
 
 ### session — Temporary Relay Endpoint
 
-When you run `bit relay serve`, the relay creates a **session** — a temporary endpoint identified by a random ID (e.g., `AbCdEfGh`) or a named path (e.g., `alice/my-repo`). The session is active as long as the `serve` command is running.
+Running `bit relay serve` creates a session on the relay — a temporary endpoint identified by a random ID (e.g., `AbCdEfGh`) or a named path (e.g., `alice/my-repo`). Active only while the `serve` command is running.
 
-## Prerequisites
-
-- **bit CLI** installed:
-  ```bash
-  # Install via shell script (Mac/Linux)
-  curl -fsSL https://raw.githubusercontent.com/mizchi/bit-vcs/main/install.sh | bash
-
-  # Or install via MoonBit package manager
-  moon install mizchi/bit/cmd/bit
-  ```
-- A running **bit-relay** server URL (e.g., `relay+https://bit-relay.mizchi.workers.dev`)
-- (Optional) An **Ed25519 signing key** for authenticated publishing
-
-Verify your setup:
-
-```bash
-bit --version
-curl https://bit-relay.mizchi.workers.dev/health
-# => {"status":"ok","service":"bit-relay"}
-```
-
-## 1. Environment Setup
+## Configuration
 
 ### Environment Variables
 
-Configure the relay URL and sender identity via environment variables:
-
 ```bash
-# Relay URL (used as default for serve/sync commands)
+# Relay URL (default for serve/sync commands)
 export BIT_RELAY_URL=relay+https://bit-relay.mizchi.workers.dev
 
-# Your sender identity
+# Sender ID
 export BIT_RELAY_SENDER=alice
 
-# (Optional) Signing key for authenticated publishing
+# Signing key file path (optional)
 export BIT_RELAY_SIGN_PRIVATE_KEY_FILE=~/.config/bit/relay-key.pem
 ```
 
@@ -116,9 +145,9 @@ openssl pkey -in ~/.config/bit/relay-key.pem -pubout -outform DER \
   | base64 | tr '+/' '-_' | tr -d '='
 ```
 
-## 2. GitHub Username Verification
+### GitHub Username Verification
 
-If the relay requires signed messages, you can link your signing key to your GitHub account. This proves your identity by matching your Ed25519 key against your GitHub SSH keys.
+Link your signing key to your GitHub account for identity verification. Matches your Ed25519 key against your GitHub SSH keys.
 
 ```bash
 # Register key and verify against GitHub SSH keys
@@ -126,63 +155,9 @@ If the relay requires signed messages, you can link your signing key to your Git
 bit relay sync push relay+https://bit-relay.mizchi.workers.dev
 ```
 
-Once verified, your relay sessions can use named paths (e.g., `alice/my-repo`) instead of random IDs.
+Once verified, relay sessions use named paths (e.g., `alice/my-repo`) instead of random IDs.
 
-## 3. Initialize a Repository
-
-Create or navigate to a git repository and initialize hub metadata:
-
-```bash
-# Create a new repository
-mkdir my-project && cd my-project
-bit init
-echo "# My Project" > README.md
-bit add .
-bit commit -m "initial commit"
-
-# Initialize issue/PR tracking
-bit issue init
-```
-
-## 4. Create Issues
-
-Issues declare a problem or task to be addressed:
-
-```bash
-# Create an issue (describe the problem, not the solution)
-bit issue create --title "Login page crashes on special characters" \
-  --body "Entering special characters in the password field causes a crash"
-
-# List issues
-bit issue list
-```
-
-## 5. Publish Hub Data to Relay
-
-Push your local hub metadata (issues, PRs, notes) to the relay server:
-
-```bash
-bit relay sync push relay+https://bit-relay.mizchi.workers.dev
-```
-
-## 6. Serve Repository via Relay
-
-Make your repository available for remote cloning through the relay:
-
-```bash
-bit relay serve relay+https://bit-relay.mizchi.workers.dev
-```
-
-Output:
-
-```
-Session registered: abc123
-Clone URL: relay+https://bit-relay.mizchi.workers.dev/abc123
-```
-
-Share the clone URL with collaborators. The session stays active while the command runs.
-
-### Options
+### relay serve Options
 
 | Option | Description |
 |--------|-------------|
@@ -190,32 +165,13 @@ Share the clone URL with collaborators. The session stays active while the comma
 | `--auto-fetch` | Auto-fetch when feature broadcasts are detected |
 | `--repo <name>` | Advertise a repository name (enables named sessions) |
 
-## 7. Clone from Relay
+### Relay URL Formats
 
-Collaborators can clone the served repository:
-
-```bash
-bit clone relay+https://bit-relay.mizchi.workers.dev/abc123
-cd abc123
-```
-
-## 8. Fetch Hub Data from Relay
-
-After cloning, fetch the hub metadata (issues, PRs) from the relay:
-
-```bash
-bit relay sync fetch relay+https://bit-relay.mizchi.workers.dev
-```
-
-Then inspect:
-
-```bash
-# List issues
-bit issue list
-
-# List pull requests
-bit pr list
-```
+| Format | Behavior |
+|--------|----------|
+| `relay+https://host` | Use relay API directly (TLS) |
+| `relay+http://host` | Use relay API directly (no TLS, for local dev) |
+| `https://host/repo.git` | Try smart-http first, fall back to relay on 404 |
 
 ## Full Workflow: Alice and Bob
 
@@ -259,19 +215,11 @@ bit issue list
 bit pr list
 ```
 
-## Relay URL Formats
-
-| Format | Behavior |
-|--------|----------|
-| `relay+https://host` | Use relay API directly (TLS) |
-| `relay+http://host` | Use relay API directly (no TLS, for local dev) |
-| `https://host/repo.git` | Try smart-http first, fall back to relay on 404 |
-
 ## bithub — Web UI for bit
 
-[bithub](https://github.com/bit-vcs/bithub) is a web server that integrates with bit to provide a GitHub-like UI. It is currently under development.
+[bithub](https://github.com/bit-vcs/bithub) is a web server that integrates with bit to provide a GitHub-like UI. Currently under development.
 
-- Browse repositories with a familiar web interface (`/blob/<path>`, `/issues`, etc.)
+- Browse repositories via web interface (`/blob/<path>`, `/issues`, etc.)
 - View issues synced via bit-relay
 - Discover other bithub nodes via relay (`/relay`)
 - Runs on Cloudflare Workers or as a local server
@@ -292,5 +240,5 @@ bit pr list
 ## Troubleshooting
 
 - **"session not found"**: The host's `bit relay serve` may have stopped. Ask the host to restart it.
-- **Signature errors**: Ensure `BIT_RELAY_SENDER` and `BIT_RELAY_SIGN_PRIVATE_KEY_FILE` are set, or use a relay with `RELAY_REQUIRE_SIGNATURE=false`.
+- **Signature errors**: Check that `BIT_RELAY_SENDER` and `BIT_RELAY_SIGN_PRIVATE_KEY_FILE` are set correctly. For testing, use a relay started with `RELAY_REQUIRE_SIGNATURE=false`.
 - **Connection refused**: Verify the relay URL and that the server is running (`curl <relay-url>/health`).

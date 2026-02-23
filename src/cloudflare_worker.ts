@@ -176,11 +176,11 @@ function extractSessionToken(request: Request): string {
     '';
 }
 
-function handleServeRoute(
+async function handleServeRoute(
   url: URL,
   request: Request,
   env: RelayWorkerEnv,
-): Response | Promise<Response> {
+): Promise<Response> {
   const pathname = url.pathname;
 
   if (pathname === '/api/v1/serve/register' && request.method === 'POST') {
