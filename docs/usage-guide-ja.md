@@ -267,6 +267,28 @@ bit pr list
 | `relay+http://host` | relay API を直接使用（非 TLS、ローカル開発用） |
 | `https://host/repo.git` | smart-http を試行、404 時に relay fallback |
 
+## bithub — bit の Web UI
+
+[bithub](https://github.com/bit-vcs/bithub) は bit と連携して GitHub のような UI を提供する Web サーバーです。現在開発中です。
+
+- 馴染みのある Web インターフェースでリポジトリを閲覧（`/blob/<path>`、`/issues` など）
+- bit-relay 経由で同期された issue を表示
+- relay を通じて他の bithub ノードを発見（`/relay`）
+- Cloudflare Workers またはローカルサーバーとして動作
+
+```bash
+# 現在のリポジトリをローカルで閲覧
+./bithub .
+
+# relay 連携あり
+./bithub . --relay relay+https://bit-relay.mizchi.workers.dev
+```
+
+## 連携予定
+
+- [sprites.dev](https://sprites.dev) — 軽量コンテナプラットフォーム。relay サーバーや bithub インスタンスのデプロイ先として連携予定。
+- [exe.dev](https://exe.dev) — リモート実行環境。bit の P2P 開発ワークフローに参加する AI エージェントクラスターの実行基盤として連携予定。
+
 ## トラブルシューティング
 
 - **"session not found"**: ホスト側の `bit relay serve` が停止した可能性があります。ホストに再起動を依頼してください。
