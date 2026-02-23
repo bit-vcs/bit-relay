@@ -7,6 +7,9 @@ test:
 dev:
   deno task dev
 
+mcp:
+  deno task mcp
+
 dev-cf:
   pnpm run dev:cf
 

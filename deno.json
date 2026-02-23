@@ -5,6 +5,7 @@
   "tasks": {
     "test": "deno test --allow-net --allow-env",
     "dev": "deno run --allow-net --allow-env --watch src/deno_main.ts",
+    "mcp": "deno run --allow-run --allow-net --allow-env --allow-read src/mcp_server.ts",
     "fmt": "deno fmt",
     "lint": "deno lint"
   },
