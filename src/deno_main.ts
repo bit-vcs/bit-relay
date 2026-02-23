@@ -1,11 +1,15 @@
 import {
   createMemoryRelayService,
+  DEFAULT_IP_PUBLISH_LIMIT_PER_WINDOW,
   DEFAULT_MAX_MESSAGES_PER_ROOM,
   DEFAULT_MAX_WS_SESSIONS,
   DEFAULT_PRESENCE_TTL_SEC,
   DEFAULT_PUBLISH_LIMIT_PER_WINDOW,
   DEFAULT_PUBLISH_PAYLOAD_MAX_BYTES,
   DEFAULT_PUBLISH_WINDOW_MS,
+  DEFAULT_ROOM_PUBLISH_LIMIT_PER_WINDOW,
+  DEFAULT_WS_IDLE_TIMEOUT_MS,
+  DEFAULT_WS_PING_INTERVAL_MS,
   type MemoryRelayOptions,
 } from './memory_handler.ts';
 import { createGitServeSession } from './git_serve_session.ts';
@@ -65,6 +69,14 @@ function optionsFromEnv(): MemoryRelayOptions {
       Deno.env.get('RELAY_PUBLISH_WINDOW_MS') ?? undefined,
       DEFAULT_PUBLISH_WINDOW_MS,
     ),
+    ipPublishLimitPerWindow: parsePositiveInt(
+      Deno.env.get('RELAY_IP_PUBLISH_LIMIT_PER_WINDOW') ?? undefined,
+      DEFAULT_IP_PUBLISH_LIMIT_PER_WINDOW,
+    ),
+    roomPublishLimitPerWindow: parsePositiveInt(
+      Deno.env.get('RELAY_ROOM_PUBLISH_LIMIT_PER_WINDOW') ?? undefined,
+      DEFAULT_ROOM_PUBLISH_LIMIT_PER_WINDOW,
+    ),
     roomTokens: parseRoomTokens(Deno.env.get('RELAY_ROOM_TOKENS') ?? undefined),
     maxWsSessions: parsePositiveInt(
       Deno.env.get('MAX_WS_SESSIONS') ?? undefined,
@@ -87,10 +99,24 @@ function optionsFromEnv(): MemoryRelayOptions {
       Deno.env.get('RELAY_PRESENCE_TTL_SEC') ?? undefined,
       DEFAULT_PRESENCE_TTL_SEC,
     ),
+    wsPingIntervalMs: parsePositiveInt(
+      Deno.env.get('WS_PING_INTERVAL_SEC') ?? undefined,
+      DEFAULT_WS_PING_INTERVAL_MS / 1000,
+    ) * 1000,
+    wsIdleTimeoutMs: parsePositiveInt(
+      Deno.env.get('WS_IDLE_TIMEOUT_SEC') ?? undefined,
+      DEFAULT_WS_IDLE_TIMEOUT_MS / 1000,
+    ) * 1000,
   };
 }
 
 const SESSION_ID_PATTERN = /^[A-Za-z0-9]{6,16}$/;
+const NAMED_SESSION_PATTERN =
+  /^[A-Za-z0-9][A-Za-z0-9._-]{0,38}\/[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+function isValidSessionId(id: string): boolean {
+  return SESSION_ID_PATTERN.test(id) || NAMED_SESSION_PATTERN.test(id);
+}
 
 function generateSessionId(): string {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
@@ -138,23 +164,59 @@ async function handleRequest(request: Request): Promise<Response> {
   const pathname = url.pathname;
 
   // Git serve session routes: /git/<session_id>/...
-  const gitMatch = pathname.match(/^\/git\/([A-Za-z0-9]{6,16})\/(.*)/);
-  if (gitMatch) {
-    const sessionId = gitMatch[1];
-    const _gitPath = '/' + gitMatch[2];
+  // 1. Named session: /git/owner/repo/path...
+  const namedGitMatch = pathname.match(
+    /^\/git\/([A-Za-z0-9][A-Za-z0-9._-]*)\/([A-Za-z0-9][A-Za-z0-9._-]*)\/(.*)/,
+  );
+  if (namedGitMatch) {
+    const candidateId = `${namedGitMatch[1]}/${namedGitMatch[2]}`;
+    if (gitServeSessions.has(candidateId)) {
+      const session = gitServeSessions.get(candidateId)!;
+      const sessionUrl = new URL(request.url);
+      sessionUrl.pathname = '/git/' + namedGitMatch[3];
+      const sessionRequest = new Request(sessionUrl.toString(), request);
+      return session.fetch(sessionRequest);
+    }
+    // fallthrough: try as random ID
+  }
+
+  // 2. Random session: /git/randomId/path...
+  const randomGitMatch = pathname.match(/^\/git\/([A-Za-z0-9]{6,16})\/(.*)/);
+  if (randomGitMatch) {
+    const sessionId = randomGitMatch[1];
     const session = gitServeSessions.get(sessionId);
     if (!session) {
       return Response.json({ ok: false, error: 'session not found' }, { status: 404 });
     }
     const sessionUrl = new URL(request.url);
-    sessionUrl.pathname = '/git/' + gitMatch[2];
+    sessionUrl.pathname = '/git/' + randomGitMatch[2];
     const sessionRequest = new Request(sessionUrl.toString(), request);
     return session.fetch(sessionRequest);
   }
 
   // Serve API routes
   if (pathname === '/api/v1/serve/register' && request.method === 'POST') {
-    const sessionId = generateSessionId();
+    const sender = url.searchParams.get('sender') ?? '';
+    const repo = url.searchParams.get('repo') ?? '';
+    let sessionId: string;
+
+    if (sender && repo) {
+      const keyInfoRes = await service.fetch(
+        new Request(
+          `http://localhost/api/v1/key/info?sender=${encodeURIComponent(sender)}`,
+        ),
+      );
+      const keyInfo = await keyInfoRes.json() as Record<string, unknown>;
+      const keyRecord = keyInfo.key as Record<string, unknown> | undefined;
+      if (keyInfoRes.status === 200 && keyRecord?.github_verified_at) {
+        sessionId = `${sender}/${repo}`;
+      } else {
+        sessionId = generateSessionId();
+      }
+    } else {
+      sessionId = generateSessionId();
+    }
+
     const session = getOrCreateSession(sessionId);
     const sessionRequest = new Request('http://localhost/register', { method: 'POST' });
     const result = await session.fetch(sessionRequest);
@@ -164,7 +226,7 @@ async function handleRequest(request: Request): Promise<Response> {
 
   if (pathname === '/api/v1/serve/poll' && request.method === 'GET') {
     const sessionId = url.searchParams.get('session') ?? '';
-    if (!SESSION_ID_PATTERN.test(sessionId)) {
+    if (!isValidSessionId(sessionId)) {
       return Response.json({ ok: false, error: 'invalid session' }, { status: 400 });
     }
     const session = gitServeSessions.get(sessionId);
@@ -182,7 +244,7 @@ async function handleRequest(request: Request): Promise<Response> {
 
   if (pathname === '/api/v1/serve/respond' && request.method === 'POST') {
     const sessionId = url.searchParams.get('session') ?? '';
-    if (!SESSION_ID_PATTERN.test(sessionId)) {
+    if (!isValidSessionId(sessionId)) {
       return Response.json({ ok: false, error: 'invalid session' }, { status: 400 });
     }
     const session = gitServeSessions.get(sessionId);
@@ -203,7 +265,7 @@ async function handleRequest(request: Request): Promise<Response> {
 
   if (pathname === '/api/v1/serve/info' && request.method === 'GET') {
     const sessionId = url.searchParams.get('session') ?? '';
-    if (!SESSION_ID_PATTERN.test(sessionId)) {
+    if (!isValidSessionId(sessionId)) {
       return Response.json({ ok: false, error: 'invalid session' }, { status: 400 });
     }
     const session = gitServeSessions.get(sessionId);
@@ -219,7 +281,24 @@ async function handleRequest(request: Request): Promise<Response> {
   }
 
   // Fall through to existing relay service
-  return service.fetch(request);
+  const response = await service.fetch(request);
+
+  // Log state-changing operations
+  if (response.status === 200 && request.method === 'POST') {
+    const sender = url.searchParams.get('sender') ?? '';
+    const room = url.searchParams.get('room') ?? '';
+    if (pathname === '/api/v1/publish') {
+      const topic = url.searchParams.get('topic') ?? 'notify';
+      const id = url.searchParams.get('id') ?? '';
+      console.log(`[publish] room=${room} sender=${sender} topic=${topic} id=${id}`);
+    } else if (pathname === '/api/v1/review') {
+      const prId = url.searchParams.get('pr_id') ?? '';
+      const verdict = url.searchParams.get('verdict') ?? '';
+      console.log(`[review] room=${room} sender=${sender} pr_id=${prId} verdict=${verdict}`);
+    }
+  }
+
+  return response;
 }
 
 console.log(`[bit-relay] listening on http://${host}:${port}`);

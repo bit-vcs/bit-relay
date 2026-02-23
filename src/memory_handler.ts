@@ -1,5 +1,6 @@
 import {
   buildPublishSigningMessage,
+  buildReviewSigningMessage,
   buildRotateSigningMessage,
   canonicalizeJson,
   isLikelyBase64Url,
@@ -58,6 +59,15 @@ interface PublishAuthHeaders {
   nonce: string;
 }
 
+type ReviewVerdict = 'approve' | 'deny';
+
+interface ReviewRecord {
+  sender: string;
+  verdict: ReviewVerdict;
+  submittedAt: number;
+  updatedAt: number;
+}
+
 interface PresenceRecord {
   participantId: string;
   status: string;
@@ -65,11 +75,16 @@ interface PresenceRecord {
   lastHeartbeat: number; // epoch seconds
 }
 
+interface WsSessionMeta {
+  lastActive: number; // epoch ms
+}
+
 interface RoomState {
   messages: Envelope[];
   acksByConsumer: Map<string, Set<string>>;
-  sessions: Set<WebSocket>;
+  sessions: Map<WebSocket, WsSessionMeta>;
   presenceByParticipant: Map<string, PresenceRecord>;
+  reviewsByPr: Map<string, Map<string, ReviewRecord>>;
 }
 
 interface SnapshotPresenceRecord {
@@ -79,10 +94,19 @@ interface SnapshotPresenceRecord {
   last_heartbeat: number;
 }
 
+interface SnapshotReviewRecord {
+  sender: string;
+  verdict: string;
+  pr_id: string;
+  submitted_at: number;
+  updated_at: number;
+}
+
 interface SnapshotRoom {
   messages: Envelope[];
   acks_by_consumer: Record<string, string[]>;
   presence?: SnapshotPresenceRecord[];
+  reviews?: SnapshotReviewRecord[];
 }
 
 interface SnapshotKeyRecord {
@@ -108,6 +132,8 @@ export interface MemoryRelayOptions {
   publishPayloadMaxBytes?: number;
   publishLimitPerWindow?: number;
   publishWindowMs?: number;
+  ipPublishLimitPerWindow?: number;
+  roomPublishLimitPerWindow?: number;
   roomTokens?: Record<string, string>;
   maxWsSessions?: number;
   requireSignatures?: boolean;
@@ -115,6 +141,8 @@ export interface MemoryRelayOptions {
   nonceTtlSec?: number;
   maxNoncesPerSender?: number;
   presenceTtlSec?: number;
+  wsPingIntervalMs?: number;
+  wsIdleTimeoutMs?: number;
   fetchFn?: typeof globalThis.fetch;
 }
 
@@ -122,6 +150,7 @@ export interface MemoryRelayService {
   fetch(request: Request): Promise<Response>;
   snapshot(): RelaySnapshot;
   restore(snapshot: RelaySnapshot): void;
+  close(): void;
 }
 
 const DEFAULT_ROOM = 'main';
@@ -130,14 +159,33 @@ const DEFAULT_MAX_MESSAGES_PER_ROOM = 1000;
 const DEFAULT_PUBLISH_PAYLOAD_MAX_BYTES = 64 * 1024;
 const DEFAULT_PUBLISH_LIMIT_PER_WINDOW = 30;
 const DEFAULT_PUBLISH_WINDOW_MS = 60_000;
+const DEFAULT_IP_PUBLISH_LIMIT_PER_WINDOW = 60;
+const DEFAULT_ROOM_PUBLISH_LIMIT_PER_WINDOW = 60;
 const DEFAULT_MAX_WS_SESSIONS = 100;
 const DEFAULT_REQUIRE_SIGNATURES = true;
 const DEFAULT_MAX_CLOCK_SKEW_SEC = 300;
 const DEFAULT_NONCE_TTL_SEC = 600;
 const DEFAULT_MAX_NONCES_PER_SENDER = 2048;
+const DEFAULT_WS_PING_INTERVAL_MS = 30_000;
+const DEFAULT_WS_IDLE_TIMEOUT_MS = 90_000;
 const ROOM_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const TOPIC_PATTERN = /^[a-z][a-z0-9._-]{0,63}$/;
+const PR_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const VALID_VERDICTS: ReadonlySet<string> = new Set(['approve', 'deny']);
 const WS_OPEN_STATE = 1;
+
+function extractClientIp(request: Request): string {
+  const cfIp = (request.headers.get('cf-connecting-ip') ?? '').trim();
+  if (cfIp.length > 0) return cfIp;
+  const xff = (request.headers.get('x-forwarded-for') ?? '').trim();
+  if (xff.length > 0) {
+    const first = xff.split(',')[0].trim();
+    if (first.length > 0) return first;
+  }
+  const realIp = (request.headers.get('x-real-ip') ?? '').trim();
+  if (realIp.length > 0) return realIp;
+  return '';
+}
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -394,8 +442,9 @@ function createRoomState(): RoomState {
   return {
     messages: [],
     acksByConsumer: new Map(),
-    sessions: new Set(),
+    sessions: new Map(),
     presenceByParticipant: new Map(),
+    reviewsByPr: new Map(),
   };
 }
 
@@ -532,16 +581,41 @@ function ackIntoRoom(
   };
 }
 
-function subscribeSocket(roomState: RoomState, socket: WebSocket): void {
-  roomState.sessions.add(socket);
-  socket.send(JSON.stringify({ type: 'ready' }));
+function subscribeSocket(
+  roomState: RoomState,
+  socket: WebSocket,
+  wsPingIntervalMs: number,
+  wsIdleTimeoutMs: number,
+): void {
+  roomState.sessions.set(socket, { lastActive: Date.now() });
+
+  const readyMessage = JSON.stringify({
+    type: 'ready',
+    keepalive: {
+      ping_interval_ms: wsPingIntervalMs,
+      idle_timeout_ms: wsIdleTimeoutMs,
+    },
+  });
+
+  if (socket.readyState === WS_OPEN_STATE) {
+    socket.send(readyMessage);
+  } else {
+    socket.addEventListener('open', () => {
+      socket.send(readyMessage);
+    }, { once: true });
+  }
 
   socket.addEventListener('message', (event) => {
+    const meta = roomState.sessions.get(socket);
+    if (meta) {
+      meta.lastActive = Date.now();
+    }
     try {
       const parsed = JSON.parse(String(event.data));
       if (parsed?.type === 'ping') {
         socket.send(JSON.stringify({ type: 'pong' }));
       }
+      // 'pong' responses from client are handled implicitly via lastActive update above
     } catch {
       // ignore malformed client payloads
     }
@@ -567,7 +641,7 @@ function broadcastPublish(
     cursor,
     envelope: sanitizeEnvelope(envelope),
   });
-  for (const socket of roomState.sessions) {
+  for (const socket of roomState.sessions.keys()) {
     if (socket.readyState !== WS_OPEN_STATE) continue;
     try {
       socket.send(message);
@@ -601,7 +675,53 @@ function broadcastPresenceChange(
     metadata,
     event,
   });
-  for (const socket of roomState.sessions) {
+  for (const socket of roomState.sessions.keys()) {
+    if (socket.readyState !== WS_OPEN_STATE) continue;
+    try {
+      socket.send(message);
+    } catch {
+      roomState.sessions.delete(socket);
+    }
+  }
+}
+
+function computeReviewStatus(
+  reviews: Map<string, ReviewRecord>,
+): { approve_count: number; deny_count: number; total: number; resolved: boolean } {
+  let approve_count = 0;
+  let deny_count = 0;
+  for (const record of reviews.values()) {
+    if (record.verdict === 'approve') approve_count++;
+    else deny_count++;
+  }
+  const total = approve_count + deny_count;
+  const resolved = total > 0 && approve_count / total >= 0.5;
+  return { approve_count, deny_count, total, resolved };
+}
+
+function broadcastReviewChange(
+  roomState: RoomState,
+  room: string,
+  prId: string,
+  sender: string,
+  verdict: string,
+  event: string,
+  resolved: boolean,
+  approve_count: number,
+  deny_count: number,
+): void {
+  const message = JSON.stringify({
+    type: 'review',
+    room,
+    pr_id: prId,
+    sender,
+    verdict,
+    event,
+    resolved,
+    approve_count,
+    deny_count,
+  });
+  for (const socket of roomState.sessions.keys()) {
     if (socket.readyState !== WS_OPEN_STATE) continue;
     try {
       socket.send(message);
@@ -639,6 +759,14 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
     1,
     Math.trunc(options.publishWindowMs ?? DEFAULT_PUBLISH_WINDOW_MS),
   );
+  const ipPublishLimitPerWindow = Math.max(
+    1,
+    Math.trunc(options.ipPublishLimitPerWindow ?? DEFAULT_IP_PUBLISH_LIMIT_PER_WINDOW),
+  );
+  const roomPublishLimitPerWindow = Math.max(
+    1,
+    Math.trunc(options.roomPublishLimitPerWindow ?? DEFAULT_ROOM_PUBLISH_LIMIT_PER_WINDOW),
+  );
   const maxWsSessions = Math.max(1, Math.trunc(options.maxWsSessions ?? DEFAULT_MAX_WS_SESSIONS));
   const requireSignatures = parseBoolOrDefault(
     options.requireSignatures,
@@ -657,12 +785,57 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
     1,
     Math.trunc(options.presenceTtlSec ?? DEFAULT_PRESENCE_TTL_SEC),
   );
+  const wsPingIntervalMs = Math.max(
+    1000,
+    Math.trunc(options.wsPingIntervalMs ?? DEFAULT_WS_PING_INTERVAL_MS),
+  );
+  const wsIdleTimeoutMs = Math.max(
+    wsPingIntervalMs + 1000,
+    Math.trunc(options.wsIdleTimeoutMs ?? DEFAULT_WS_IDLE_TIMEOUT_MS),
+  );
   const fetchFn = options.fetchFn ?? globalThis.fetch;
 
   const rooms = new Map<string, RoomState>();
   const senderRateCounts = new Map<string, RateCounter>();
+  const ipRateCounts = new Map<string, RateCounter>();
+  const roomRateCounts = new Map<string, RateCounter>();
   const keyRegistry = new Map<string, KeyRecord>();
   const noncesBySender = new Map<string, Map<string, number>>();
+  let lastReapAt = Date.now();
+
+  function reapDeadConnections(): void {
+    const now = Date.now();
+    const pingMessage = JSON.stringify({ type: 'ping' });
+    for (const roomState of rooms.values()) {
+      for (const [socket, meta] of roomState.sessions.entries()) {
+        if (socket.readyState !== WS_OPEN_STATE) {
+          roomState.sessions.delete(socket);
+          continue;
+        }
+        if (now - meta.lastActive >= wsIdleTimeoutMs) {
+          try {
+            socket.close(1001, 'idle timeout');
+          } catch {
+            // ignore
+          }
+          roomState.sessions.delete(socket);
+          continue;
+        }
+        try {
+          socket.send(pingMessage);
+        } catch {
+          roomState.sessions.delete(socket);
+        }
+      }
+    }
+    lastReapAt = now;
+  }
+
+  const enableReapInterval = options.wsPingIntervalMs !== undefined &&
+    typeof setInterval !== 'undefined';
+  const reapIntervalId = enableReapInterval
+    ? setInterval(reapDeadConnections, wsPingIntervalMs)
+    : null;
 
   function pruneSenderNonces(sender: string, nowSec: number): Map<string, number> {
     const map = noncesBySender.get(sender) ?? new Map<string, number>();
@@ -815,7 +988,7 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
       const client = pair[0];
       const server = pair[1] as WebSocket & { accept(): void };
       server.accept();
-      subscribeSocket(roomState, server);
+      subscribeSocket(roomState, server, wsPingIntervalMs, wsIdleTimeoutMs);
       return new Response(
         null,
         { status: 101, webSocket: client } as ResponseInit & { webSocket: WebSocket },
@@ -828,7 +1001,7 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
     const maybeDeno = (globalThis as { Deno?: DenoLike }).Deno;
     if (maybeDeno && typeof maybeDeno.upgradeWebSocket === 'function') {
       const { response, socket } = maybeDeno.upgradeWebSocket(request);
-      subscribeSocket(roomState, socket);
+      subscribeSocket(roomState, socket, wsPingIntervalMs, wsIdleTimeoutMs);
       return response;
     }
 
@@ -1036,6 +1209,10 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
   }
 
   async function fetch(request: Request): Promise<Response> {
+    if (Date.now() - lastReapAt >= wsPingIntervalMs) {
+      reapDeadConnections();
+    }
+
     const url = new URL(request.url);
     const { pathname } = url;
 
@@ -1093,6 +1270,20 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
       const signatureFromQuery = (url.searchParams.get('sig') ?? '').trim();
 
       const now = Date.now();
+      const clientIp = extractClientIp(request);
+      if (clientIp.length > 0) {
+        const ipRate = fallbackRateLimit(
+          ipRateCounts.get(clientIp),
+          now,
+          ipPublishLimitPerWindow,
+          publishWindowMs,
+        );
+        ipRateCounts.set(clientIp, ipRate.next);
+        if (!ipRate.allowed) {
+          return toErrorResponse('ip rate limit exceeded', 429);
+        }
+      }
+
       const rate = fallbackRateLimit(
         senderRateCounts.get(sender),
         now,
@@ -1102,6 +1293,17 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
       senderRateCounts.set(sender, rate.next);
       if (!rate.allowed) {
         return toErrorResponse('sender rate limit exceeded', 429);
+      }
+
+      const roomRate = fallbackRateLimit(
+        roomRateCounts.get(room),
+        now,
+        roomPublishLimitPerWindow,
+        publishWindowMs,
+      );
+      roomRateCounts.set(room, roomRate.next);
+      if (!roomRate.allowed) {
+        return toErrorResponse('room rate limit exceeded', 429);
       }
 
       const contentLength = Number(request.headers.get('content-length') ?? '');
@@ -1314,6 +1516,147 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
       return methodNotAllowedResponse();
     }
 
+    if (pathname === '/api/v1/review') {
+      const room = normalizeRoom(url.searchParams.get('room'));
+      if (!isValidRoomName(room)) {
+        return invalidRoomResponse();
+      }
+      const reviewRoomTokenError = checkRoomToken(request, room);
+      if (reviewRoomTokenError) return reviewRoomTokenError;
+
+      if (request.method === 'GET') {
+        const prId = (url.searchParams.get('pr_id') ?? '').trim();
+        if (prId.length === 0) {
+          return toErrorResponse('missing query: pr_id', 400);
+        }
+        if (!PR_ID_PATTERN.test(prId)) {
+          return toErrorResponse('invalid pr_id', 400);
+        }
+        const roomState = getOrCreateRoomState(rooms, room);
+        const reviewMap = roomState.reviewsByPr.get(prId) ?? new Map<string, ReviewRecord>();
+        const status = computeReviewStatus(reviewMap);
+        const reviews: JsonValue[] = [];
+        for (const record of reviewMap.values()) {
+          reviews.push({
+            sender: record.sender,
+            verdict: record.verdict,
+            submitted_at: record.submittedAt,
+            updated_at: record.updatedAt,
+          });
+        }
+        return Response.json({
+          ok: true,
+          room,
+          pr_id: prId,
+          resolved: status.resolved,
+          approve_count: status.approve_count,
+          deny_count: status.deny_count,
+          reviews,
+        }, { status: 200 });
+      }
+
+      if (request.method === 'POST') {
+        const sender = (url.searchParams.get('sender') ?? '').trim();
+        if (sender.length === 0) {
+          return toErrorResponse('missing query: sender', 400);
+        }
+        const prId = (url.searchParams.get('pr_id') ?? '').trim();
+        if (prId.length === 0) {
+          return toErrorResponse('missing query: pr_id', 400);
+        }
+        if (!PR_ID_PATTERN.test(prId)) {
+          return toErrorResponse('invalid pr_id', 400);
+        }
+        const verdict = (url.searchParams.get('verdict') ?? '').trim();
+        if (!VALID_VERDICTS.has(verdict)) {
+          return toErrorResponse('invalid verdict', 400);
+        }
+
+        // Signature is always required for review (attestation)
+        const authParsed = parsePublishAuthHeaders(request);
+        if (!authParsed.ok) {
+          return toErrorResponse(authParsed.error, authParsed.status);
+        }
+        if (!authParsed.auth) {
+          return toErrorResponse('missing signature headers', 401);
+        }
+
+        const auth = authParsed.auth;
+        const nowSec = nowEpochSec();
+        if (Math.abs(nowSec - auth.timestampSec) > maxClockSkewSec) {
+          return toErrorResponse('stale signature timestamp', 401);
+        }
+        if (isReplayNonce(sender, auth.nonce, nowSec)) {
+          return toErrorResponse('replayed nonce', 409);
+        }
+
+        const signingMessage = buildReviewSigningMessage({
+          sender,
+          room,
+          prId,
+          verdict,
+          ts: auth.timestampSec,
+          nonce: auth.nonce,
+        });
+        const verified = await verifyEd25519Signature(
+          auth.publicKey,
+          signingMessage,
+          auth.signature,
+        );
+        if (!verified) {
+          return toErrorResponse('invalid signature', 401);
+        }
+
+        const tofuError = ensureTofuKey(sender, auth.publicKey, nowSec);
+        if (tofuError) return tofuError;
+        rememberNonce(sender, auth.nonce, auth.timestampSec, nowSec);
+
+        const roomState = getOrCreateRoomState(rooms, room);
+        let prReviews = roomState.reviewsByPr.get(prId);
+        if (!prReviews) {
+          prReviews = new Map<string, ReviewRecord>();
+          roomState.reviewsByPr.set(prId, prReviews);
+        }
+
+        const existing = prReviews.get(sender);
+        const event = existing ? 'updated' : 'submitted';
+        const submittedAt = existing ? existing.submittedAt : nowSec;
+        prReviews.set(sender, {
+          sender,
+          verdict: verdict as ReviewVerdict,
+          submittedAt,
+          updatedAt: nowSec,
+        });
+
+        const reviewStatus = computeReviewStatus(prReviews);
+        broadcastReviewChange(
+          roomState,
+          room,
+          prId,
+          sender,
+          verdict,
+          event,
+          reviewStatus.resolved,
+          reviewStatus.approve_count,
+          reviewStatus.deny_count,
+        );
+
+        return Response.json({
+          ok: true,
+          room,
+          pr_id: prId,
+          sender,
+          verdict,
+          event,
+          resolved: reviewStatus.resolved,
+          approve_count: reviewStatus.approve_count,
+          deny_count: reviewStatus.deny_count,
+        }, { status: 200 });
+      }
+
+      return methodNotAllowedResponse();
+    }
+
     return notFoundResponse();
   }
 
@@ -1333,10 +1676,23 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
           last_heartbeat: record.lastHeartbeat,
         });
       }
+      const reviews: SnapshotReviewRecord[] = [];
+      for (const [prId, senderMap] of roomState.reviewsByPr.entries()) {
+        for (const record of senderMap.values()) {
+          reviews.push({
+            sender: record.sender,
+            verdict: record.verdict,
+            pr_id: prId,
+            submitted_at: record.submittedAt,
+            updated_at: record.updatedAt,
+          });
+        }
+      }
       snapshotRooms[room] = {
         messages: JSON.parse(JSON.stringify(roomState.messages)) as Envelope[],
         acks_by_consumer: acks,
         ...(presence.length > 0 ? { presence } : {}),
+        ...(reviews.length > 0 ? { reviews } : {}),
       };
     }
 
@@ -1447,6 +1803,33 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
           }
         }
 
+        if (Array.isArray(value.reviews)) {
+          for (const r of value.reviews) {
+            if (!isObjectRecord(r)) continue;
+            const rSender = (typeof r.sender === 'string' ? r.sender : '').trim();
+            const rPrId = (typeof r.pr_id === 'string' ? r.pr_id : '').trim();
+            const rVerdict = typeof r.verdict === 'string' ? r.verdict : '';
+            if (rSender.length === 0 || rPrId.length === 0) continue;
+            if (!VALID_VERDICTS.has(rVerdict)) continue;
+            if (!PR_ID_PATTERN.test(rPrId)) continue;
+            const submittedAt = typeof r.submitted_at === 'number'
+              ? Math.trunc(r.submitted_at)
+              : 0;
+            const updatedAt = typeof r.updated_at === 'number' ? Math.trunc(r.updated_at) : 0;
+            let prReviews = roomState.reviewsByPr.get(rPrId);
+            if (!prReviews) {
+              prReviews = new Map<string, ReviewRecord>();
+              roomState.reviewsByPr.set(rPrId, prReviews);
+            }
+            prReviews.set(rSender, {
+              sender: rSender,
+              verdict: rVerdict as ReviewVerdict,
+              submittedAt,
+              updatedAt,
+            });
+          }
+        }
+
         rooms.set(room, roomState);
       }
     }
@@ -1493,10 +1876,17 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
     }
   }
 
+  function close(): void {
+    if (reapIntervalId !== null) {
+      clearInterval(reapIntervalId);
+    }
+  }
+
   return {
     fetch,
     snapshot,
     restore,
+    close,
   };
 }
 
@@ -1508,6 +1898,7 @@ export function createMemoryRelayHandler(
 }
 
 export {
+  DEFAULT_IP_PUBLISH_LIMIT_PER_WINDOW,
   DEFAULT_MAX_CLOCK_SKEW_SEC,
   DEFAULT_MAX_MESSAGES_PER_ROOM,
   DEFAULT_MAX_NONCES_PER_SENDER,
@@ -1519,6 +1910,9 @@ export {
   DEFAULT_PUBLISH_WINDOW_MS,
   DEFAULT_REQUIRE_SIGNATURES,
   DEFAULT_ROOM,
+  DEFAULT_ROOM_PUBLISH_LIMIT_PER_WINDOW,
+  DEFAULT_WS_IDLE_TIMEOUT_MS,
+  DEFAULT_WS_PING_INTERVAL_MS,
   healthResponse,
   isValidRoomName,
   isValidTopic,

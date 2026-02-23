@@ -1,5 +1,6 @@
 import {
   createMemoryRelayService,
+  DEFAULT_IP_PUBLISH_LIMIT_PER_WINDOW,
   DEFAULT_MAX_MESSAGES_PER_ROOM,
   DEFAULT_MAX_WS_SESSIONS,
   DEFAULT_PRESENCE_TTL_SEC,
@@ -7,6 +8,9 @@ import {
   DEFAULT_PUBLISH_PAYLOAD_MAX_BYTES,
   DEFAULT_PUBLISH_WINDOW_MS,
   DEFAULT_ROOM,
+  DEFAULT_ROOM_PUBLISH_LIMIT_PER_WINDOW,
+  DEFAULT_WS_IDLE_TIMEOUT_MS,
+  DEFAULT_WS_PING_INTERVAL_MS,
   healthResponse,
   isValidRoomName,
   type MemoryRelayOptions,
@@ -49,6 +53,10 @@ export interface RelayWorkerEnv {
   RELAY_NONCE_TTL_SEC?: string;
   RELAY_MAX_NONCES_PER_SENDER?: string;
   RELAY_PRESENCE_TTL_SEC?: string;
+  RELAY_IP_PUBLISH_LIMIT_PER_WINDOW?: string;
+  RELAY_ROOM_PUBLISH_LIMIT_PER_WINDOW?: string;
+  WS_PING_INTERVAL_SEC?: string;
+  WS_IDLE_TIMEOUT_SEC?: string;
   GIT_SERVE_SESSION_TTL_SEC?: string;
 }
 
@@ -107,6 +115,14 @@ function buildOptions(env: RelayWorkerEnv): MemoryRelayOptions {
       DEFAULT_PUBLISH_LIMIT_PER_WINDOW,
     ),
     publishWindowMs: parsePositiveInt(env.RELAY_PUBLISH_WINDOW_MS, DEFAULT_PUBLISH_WINDOW_MS),
+    ipPublishLimitPerWindow: parsePositiveInt(
+      env.RELAY_IP_PUBLISH_LIMIT_PER_WINDOW,
+      DEFAULT_IP_PUBLISH_LIMIT_PER_WINDOW,
+    ),
+    roomPublishLimitPerWindow: parsePositiveInt(
+      env.RELAY_ROOM_PUBLISH_LIMIT_PER_WINDOW,
+      DEFAULT_ROOM_PUBLISH_LIMIT_PER_WINDOW,
+    ),
     roomTokens: parseRoomTokens(env.RELAY_ROOM_TOKENS),
     maxWsSessions: parsePositiveInt(env.MAX_WS_SESSIONS, DEFAULT_MAX_WS_SESSIONS),
     requireSignatures: parseBoolean(env.RELAY_REQUIRE_SIGNATURE, true),
@@ -114,6 +130,10 @@ function buildOptions(env: RelayWorkerEnv): MemoryRelayOptions {
     nonceTtlSec: parsePositiveInt(env.RELAY_NONCE_TTL_SEC, 600),
     maxNoncesPerSender: parsePositiveInt(env.RELAY_MAX_NONCES_PER_SENDER, 2048),
     presenceTtlSec: parsePositiveInt(env.RELAY_PRESENCE_TTL_SEC, DEFAULT_PRESENCE_TTL_SEC),
+    wsPingIntervalMs: parsePositiveInt(env.WS_PING_INTERVAL_SEC, DEFAULT_WS_PING_INTERVAL_MS / 1000) *
+      1000,
+    wsIdleTimeoutMs: parsePositiveInt(env.WS_IDLE_TIMEOUT_SEC, DEFAULT_WS_IDLE_TIMEOUT_MS / 1000) *
+      1000,
   };
 }
 
@@ -122,6 +142,12 @@ function isRelayRoute(pathname: string): boolean {
 }
 
 const SESSION_ID_PATTERN = /^[A-Za-z0-9]{6,16}$/;
+const NAMED_SESSION_PATTERN =
+  /^[A-Za-z0-9][A-Za-z0-9._-]{0,38}\/[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+function isValidSessionId(id: string): boolean {
+  return SESSION_ID_PATTERN.test(id) || NAMED_SESSION_PATTERN.test(id);
+}
 
 function generateSessionId(): string {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
@@ -158,7 +184,47 @@ function handleServeRoute(
   const pathname = url.pathname;
 
   if (pathname === '/api/v1/serve/register' && request.method === 'POST') {
-    const sessionId = generateSessionId();
+    const sender = url.searchParams.get('sender') ?? '';
+    const repo = url.searchParams.get('repo') ?? '';
+    let sessionId: string;
+
+    if (sender && repo && env.RELAY_ROOM) {
+      const relayRoomStub = env.RELAY_ROOM.get(
+        env.RELAY_ROOM.idFromName('__default__'),
+      );
+      const keyInfoRes = await relayRoomStub.fetch(
+        new Request(
+          `http://do/api/v1/key/info?sender=${encodeURIComponent(sender)}`,
+        ),
+      );
+      const keyInfo = (await keyInfoRes.json()) as Record<string, unknown>;
+      const keyRecord = keyInfo.key as Record<string, unknown> | undefined;
+      if (keyInfoRes.status === 200 && keyRecord?.github_verified_at) {
+        sessionId = `${sender}/${repo}`;
+      } else {
+        sessionId = generateSessionId();
+      }
+    } else if (sender && repo) {
+      // No RELAY_ROOM DO — use fallback service
+      if (fallbackService === null) {
+        fallbackService = createMemoryRelayService(buildOptions(env));
+      }
+      const keyInfoRes = await fallbackService.fetch(
+        new Request(
+          `http://localhost/api/v1/key/info?sender=${encodeURIComponent(sender)}`,
+        ),
+      );
+      const keyInfo = (await keyInfoRes.json()) as Record<string, unknown>;
+      const keyRecord = keyInfo.key as Record<string, unknown> | undefined;
+      if (keyInfoRes.status === 200 && keyRecord?.github_verified_at) {
+        sessionId = `${sender}/${repo}`;
+      } else {
+        sessionId = generateSessionId();
+      }
+    } else {
+      sessionId = generateSessionId();
+    }
+
     const stub = getGitServeSessionStub(env, sessionId);
     if (!stub) {
       return Response.json(
@@ -178,7 +244,7 @@ function handleServeRoute(
   }
 
   const sessionParam = url.searchParams.get('session') ?? '';
-  if (!SESSION_ID_PATTERN.test(sessionParam)) {
+  if (!isValidSessionId(sessionParam)) {
     return Response.json(
       { ok: false, error: 'invalid or missing session id' },
       { status: 400 },
@@ -291,7 +357,8 @@ export class RelayRoom {
       pathname === '/api/v1/presence/heartbeat' ||
       pathname === '/api/v1/key/rotate' ||
       pathname === '/api/v1/key/verify-github' ||
-      (pathname === '/api/v1/presence' && request.method === 'DELETE')
+      (pathname === '/api/v1/presence' && request.method === 'DELETE') ||
+      (pathname === '/api/v1/review' && request.method === 'POST')
     ) {
       await this.state.storage.put(SNAPSHOT_KEY, this.service.snapshot());
     }
@@ -307,9 +374,23 @@ const worker = {
     }
 
     // Git serve session routes: /git/<session_id>/...
-    const gitMatch = url.pathname.match(/^\/git\/([A-Za-z0-9]{6,16})\/(.*)/);
-    if (gitMatch) {
-      return handleGitRoute(gitMatch[1], gitMatch[2], request, env);
+    // 1. Named session: /git/owner/repo/path...
+    const namedGitMatch = url.pathname.match(
+      /^\/git\/([A-Za-z0-9][A-Za-z0-9._-]*)\/([A-Za-z0-9][A-Za-z0-9._-]*)\/(.*)/,
+    );
+    if (namedGitMatch) {
+      const candidateId = `${namedGitMatch[1]}/${namedGitMatch[2]}`;
+      // Named sessions always go to DO — the DO will return 404 if not active
+      if (env.GIT_SERVE_SESSION) {
+        return handleGitRoute(candidateId, namedGitMatch[3], request, env);
+      }
+      // fallthrough: try as random ID
+    }
+
+    // 2. Random session: /git/randomId/path...
+    const randomGitMatch = url.pathname.match(/^\/git\/([A-Za-z0-9]{6,16})\/(.*)/);
+    if (randomGitMatch) {
+      return handleGitRoute(randomGitMatch[1], randomGitMatch[2], request, env);
     }
 
     // Serve API routes: /api/v1/serve/...

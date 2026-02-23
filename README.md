@@ -180,6 +180,63 @@ just sprites-logs myapp
 bit hub sync issue-url relay+https://<sprite-url> --room <room> --room-token <token>
 ```
 
+## Run on exe.dev
+
+exe.dev の VM に SSH でデプロイします。
+
+```bash
+# SSH 先を指定してデプロイ
+just deploy-exe user@myapp.exe.dev
+
+# ログ確認
+just exe-logs user@myapp.exe.dev
+```
+
+直接実行する場合:
+
+```bash
+EXE_HOST=user@myapp.exe.dev PORT=8080 tools/deploy-exe.sh
+```
+
+### Git Serve Session の検証
+
+relay を常駐させた状態で、外部からファイルの読み書きフローを検証できます。
+
+```bash
+# ローカルで検証
+deno task dev &
+just test-serve
+
+# exe.dev 上の relay で検証
+just test-serve https://myapp.exe.dev
+```
+
+テストスクリプト (`tools/test-serve-flow.sh`) は以下のフローを検証します:
+
+1. `POST /api/v1/serve/register` — セッション登録
+2. `GET /api/v1/serve/info` — セッション状態確認
+3. **読み取り (GET)**: clone 側がファイルを要求 → serve 側が poll → respond → clone 側が受信
+4. **書き込み (POST)**: clone 側がデータを送信 → serve 側が poll でボディを受信 → respond
+
+```
+┌──────────┐     ┌──────────────┐     ┌──────────┐
+│Clone side│     │  bit-relay   │     │Serve side│
+│(外部)    │     │  (exe.dev)   │     │(ファイル │
+│          │     │              │     │ 所有者)  │
+└────┬─────┘     └──────┬───────┘     └────┬─────┘
+     │                  │                  │
+     │  GET /git/ID/f   │                  │
+     │ ───────────────> │  (queue)         │
+     │                  │ <──────────────  │
+     │                  │  poll (待機)     │
+     │                  │ ──────────────>  │
+     │                  │  requests[]      │
+     │                  │ <──────────────  │
+     │                  │  respond(body)   │
+     │ <─────────────── │                  │
+     │  200 (file body) │                  │
+```
+
 ## Basic checks
 
 ```bash

@@ -15,6 +15,15 @@ export interface RotateSigningInput {
   nonce: string;
 }
 
+export interface ReviewSigningInput {
+  sender: string;
+  room: string;
+  prId: string;
+  verdict: string;
+  ts: number;
+  nonce: string;
+}
+
 function bytesToBase64(bytes: Uint8Array): string {
   let binary = '';
   const chunkSize = 0x8000;
@@ -101,6 +110,19 @@ export function buildPublishSigningMessage(input: PublishSigningInput): string {
     `ts=${input.ts}`,
     `nonce=${input.nonce}`,
     `payload_sha256=${input.payloadHash}`,
+  ].join('\n');
+}
+
+export function buildReviewSigningMessage(input: ReviewSigningInput): string {
+  return [
+    'v1',
+    'op=review',
+    `sender=${input.sender}`,
+    `room=${input.room}`,
+    `pr_id=${input.prId}`,
+    `verdict=${input.verdict}`,
+    `ts=${input.ts}`,
+    `nonce=${input.nonce}`,
   ].join('\n');
 }
 

@@ -1,4 +1,4 @@
-import { assertEquals, assertObjectMatch } from '@std/assert';
+import { assertEquals, assertMatch, assertObjectMatch } from '@std/assert';
 import {
   createMemoryRelayHandler,
   createMemoryRelayService,
@@ -11,6 +11,7 @@ import {
   sha256Hex,
   signEd25519,
 } from '../src/signing.ts';
+import { createGitServeSession } from '../src/git_serve_session.ts';
 
 interface TestSigner {
   publicKey: string;
@@ -1164,6 +1165,247 @@ Deno.test('snapshot/restore - old snapshot without github fields defaults to nul
   assertEquals(snap.keys_by_sender['alice'].github_verified_at, null);
 });
 
+// --- IP rate limit tests ---
+
+Deno.test('ip rate limit - same IP exceeds limit gets 429', async () => {
+  const limit = 3;
+  const handler = createMemoryRelayHandler({
+    requireSignatures: false,
+    ipPublishLimitPerWindow: limit,
+  });
+
+  for (let i = 0; i < limit; i++) {
+    const res = await handler(
+      new Request(
+        `http://relay.local/api/v1/publish?room=main&sender=s${i}&topic=notify&id=ip${i}`,
+        {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-forwarded-for': '10.0.0.1',
+          },
+          body: JSON.stringify({ data: i }),
+        },
+      ),
+    );
+    assertEquals(res.status, 200);
+  }
+
+  const blocked = await handler(
+    new Request(
+      `http://relay.local/api/v1/publish?room=main&sender=sExtra&topic=notify&id=ip${limit}`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-forwarded-for': '10.0.0.1',
+        },
+        body: JSON.stringify({ data: 'blocked' }),
+      },
+    ),
+  );
+  assertEquals(blocked.status, 429);
+  assertObjectMatch(await blocked.json(), { ok: false, error: 'ip rate limit exceeded' });
+});
+
+Deno.test('ip rate limit - different IPs are independent', async () => {
+  const limit = 2;
+  const handler = createMemoryRelayHandler({
+    requireSignatures: false,
+    ipPublishLimitPerWindow: limit,
+  });
+
+  for (let i = 0; i < limit; i++) {
+    const res = await handler(
+      new Request(
+        `http://relay.local/api/v1/publish?room=main&sender=a&topic=notify&id=a${i}`,
+        {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-forwarded-for': '10.0.0.1',
+          },
+          body: JSON.stringify({ data: i }),
+        },
+      ),
+    );
+    assertEquals(res.status, 200);
+  }
+
+  // Different IP should still succeed
+  const res = await handler(
+    new Request(
+      'http://relay.local/api/v1/publish?room=main&sender=b&topic=notify&id=b0',
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-forwarded-for': '10.0.0.2',
+        },
+        body: JSON.stringify({ data: 0 }),
+      },
+    ),
+  );
+  assertEquals(res.status, 200);
+});
+
+Deno.test('ip rate limit - no IP header skips IP limit', async () => {
+  const handler = createMemoryRelayHandler({
+    requireSignatures: false,
+    ipPublishLimitPerWindow: 1,
+    publishLimitPerWindow: 100,
+    roomPublishLimitPerWindow: 100,
+  });
+
+  // Without IP headers, IP limit should be skipped
+  for (let i = 0; i < 3; i++) {
+    const res = await handler(
+      new Request(
+        `http://relay.local/api/v1/publish?room=main&sender=noip&topic=notify&id=noip${i}`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ data: i }),
+        },
+      ),
+    );
+    assertEquals(res.status, 200);
+  }
+});
+
+// --- room rate limit tests ---
+
+Deno.test('room rate limit - same room exceeds limit gets 429', async () => {
+  const limit = 3;
+  const handler = createMemoryRelayHandler({
+    requireSignatures: false,
+    roomPublishLimitPerWindow: limit,
+    publishLimitPerWindow: 100,
+    ipPublishLimitPerWindow: 100,
+  });
+
+  for (let i = 0; i < limit; i++) {
+    const res = await handler(
+      new Request(
+        `http://relay.local/api/v1/publish?room=crowded&sender=s${i}&topic=notify&id=rm${i}`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ data: i }),
+        },
+      ),
+    );
+    assertEquals(res.status, 200);
+  }
+
+  const blocked = await handler(
+    new Request(
+      `http://relay.local/api/v1/publish?room=crowded&sender=sExtra&topic=notify&id=rm${limit}`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ data: 'blocked' }),
+      },
+    ),
+  );
+  assertEquals(blocked.status, 429);
+  assertObjectMatch(await blocked.json(), { ok: false, error: 'room rate limit exceeded' });
+});
+
+Deno.test('room rate limit - different rooms are independent', async () => {
+  const limit = 2;
+  const handler = createMemoryRelayHandler({
+    requireSignatures: false,
+    roomPublishLimitPerWindow: limit,
+    publishLimitPerWindow: 100,
+    ipPublishLimitPerWindow: 100,
+  });
+
+  for (let i = 0; i < limit; i++) {
+    const res = await handler(
+      new Request(
+        `http://relay.local/api/v1/publish?room=roomA&sender=s${i}&topic=notify&id=ra${i}`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ data: i }),
+        },
+      ),
+    );
+    assertEquals(res.status, 200);
+  }
+
+  // Different room should still succeed
+  const res = await handler(
+    new Request(
+      'http://relay.local/api/v1/publish?room=roomB&sender=s0&topic=notify&id=rb0',
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ data: 0 }),
+      },
+    ),
+  );
+  assertEquals(res.status, 200);
+});
+
+// --- WebSocket heartbeat / reap tests ---
+
+Deno.test('close() stops reap interval without error', () => {
+  const service = createMemoryRelayService({
+    requireSignatures: false,
+    wsPingIntervalMs: 100_000,
+    wsIdleTimeoutMs: 300_000,
+  });
+  // Should not throw
+  service.close();
+  // Calling twice should also be safe
+  service.close();
+});
+
+Deno.test('request-driven reap removes stale sessions', async () => {
+  // Use very short intervals to test reap behavior
+  const service = createMemoryRelayService({
+    requireSignatures: false,
+    wsPingIntervalMs: 1, // 1ms so request-driven reap triggers every request
+    wsIdleTimeoutMs: 1, // 1ms timeout — any session is considered dead
+  });
+
+  // Publish a message to create a room
+  const publish = await service.fetch(
+    new Request('http://relay.local/api/v1/publish?room=main&sender=bit&topic=notify&id=reap1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ data: 1 }),
+    }),
+  );
+  assertEquals(publish.status, 200);
+
+  // Make another request after a small delay to trigger reap
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const poll = await service.fetch(
+    new Request('http://relay.local/api/v1/poll?room=main&after=0&limit=10'),
+  );
+  assertEquals(poll.status, 200);
+
+  service.close();
+});
+
+Deno.test('service with custom ws options starts and stops cleanly', async () => {
+  const service = createMemoryRelayService({
+    requireSignatures: false,
+    wsPingIntervalMs: 5_000,
+    wsIdleTimeoutMs: 15_000,
+  });
+
+  const res = await service.fetch(
+    new Request('http://relay.local/health'),
+  );
+  assertEquals(res.status, 200);
+
+  service.close();
+});
+
 Deno.test('key rotate resets github verification', async () => {
   const signerA = await createSignerWithRawKey();
   const signerB = await createSignerWithRawKey();
@@ -1204,4 +1446,434 @@ Deno.test('key rotate resets github verification', async () => {
   const body = await infoRes.json();
   assertEquals(body.key.github_username, null);
   assertEquals(body.key.github_verified_at, null);
+});
+
+// --- Named session tests ---
+
+const SESSION_ID_PATTERN = /^[A-Za-z0-9]{6,16}$/;
+const NAMED_SESSION_PATTERN =
+  /^[A-Za-z0-9][A-Za-z0-9._-]{0,38}\/[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+function isValidSessionId(id: string): boolean {
+  return SESSION_ID_PATTERN.test(id) || NAMED_SESSION_PATTERN.test(id);
+}
+
+function generateSessionId(): string {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  const bytes = new Uint8Array(8);
+  crypto.getRandomValues(bytes);
+  let result = '';
+  for (let i = 0; i < bytes.length; i++) {
+    result += chars[bytes[i] % chars.length];
+  }
+  return result;
+}
+
+/**
+ * Creates a test handler that mirrors deno_main.ts routing logic
+ * for named session testing.
+ */
+function createServeTestHandler(relayService: ReturnType<typeof createMemoryRelayService>) {
+  const gitServeSessions = new Map<string, ReturnType<typeof createGitServeSession>>();
+
+  function getOrCreateSession(sessionId: string) {
+    let session = gitServeSessions.get(sessionId);
+    if (!session) {
+      session = createGitServeSession();
+      gitServeSessions.set(sessionId, session);
+    }
+    return session;
+  }
+
+  async function handleRequest(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const pathname = url.pathname;
+
+    // Named session git route
+    const namedGitMatch = pathname.match(
+      /^\/git\/([A-Za-z0-9][A-Za-z0-9._-]*)\/([A-Za-z0-9][A-Za-z0-9._-]*)\/(.*)/,
+    );
+    if (namedGitMatch) {
+      const candidateId = `${namedGitMatch[1]}/${namedGitMatch[2]}`;
+      if (gitServeSessions.has(candidateId)) {
+        const session = gitServeSessions.get(candidateId)!;
+        const sessionUrl = new URL(request.url);
+        sessionUrl.pathname = '/git/' + namedGitMatch[3];
+        return session.fetch(new Request(sessionUrl.toString(), request));
+      }
+    }
+
+    // Random session git route
+    const randomGitMatch = pathname.match(/^\/git\/([A-Za-z0-9]{6,16})\/(.*)/);
+    if (randomGitMatch) {
+      const session = gitServeSessions.get(randomGitMatch[1]);
+      if (!session) {
+        return Response.json({ ok: false, error: 'session not found' }, { status: 404 });
+      }
+      const sessionUrl = new URL(request.url);
+      sessionUrl.pathname = '/git/' + randomGitMatch[2];
+      return session.fetch(new Request(sessionUrl.toString(), request));
+    }
+
+    // Register
+    if (pathname === '/api/v1/serve/register' && request.method === 'POST') {
+      const sender = url.searchParams.get('sender') ?? '';
+      const repo = url.searchParams.get('repo') ?? '';
+      let sessionId: string;
+
+      if (sender && repo) {
+        const keyInfoRes = await relayService.fetch(
+          new Request(`http://localhost/api/v1/key/info?sender=${encodeURIComponent(sender)}`),
+        );
+        const keyInfo = await keyInfoRes.json() as Record<string, unknown>;
+        const keyRecord = keyInfo.key as Record<string, unknown> | undefined;
+        if (keyInfoRes.status === 200 && keyRecord?.github_verified_at) {
+          sessionId = `${sender}/${repo}`;
+        } else {
+          sessionId = generateSessionId();
+        }
+      } else {
+        sessionId = generateSessionId();
+      }
+
+      const session = getOrCreateSession(sessionId);
+      const result = await session.fetch(new Request('http://localhost/register', { method: 'POST' }));
+      const body = await result.json() as Record<string, unknown>;
+      return Response.json({ ...body, session_id: sessionId });
+    }
+
+    // Poll
+    if (pathname === '/api/v1/serve/poll' && request.method === 'GET') {
+      const sessionId = url.searchParams.get('session') ?? '';
+      if (!isValidSessionId(sessionId)) {
+        return Response.json({ ok: false, error: 'invalid session' }, { status: 400 });
+      }
+      const session = gitServeSessions.get(sessionId);
+      if (!session) {
+        return Response.json({ ok: false, error: 'session not found' }, { status: 404 });
+      }
+      const timeout = url.searchParams.get('timeout') ?? '30';
+      const token = url.searchParams.get('session_token') ?? request.headers.get('x-session-token') ?? '';
+      return session.fetch(
+        new Request(`http://localhost/poll?timeout=${timeout}&session_token=${encodeURIComponent(token)}`),
+      );
+    }
+
+    // Respond
+    if (pathname === '/api/v1/serve/respond' && request.method === 'POST') {
+      const sessionId = url.searchParams.get('session') ?? '';
+      if (!isValidSessionId(sessionId)) {
+        return Response.json({ ok: false, error: 'invalid session' }, { status: 400 });
+      }
+      const session = gitServeSessions.get(sessionId);
+      if (!session) {
+        return Response.json({ ok: false, error: 'session not found' }, { status: 404 });
+      }
+      const token = url.searchParams.get('session_token') ?? request.headers.get('x-session-token') ?? '';
+      return session.fetch(
+        new Request(`http://localhost/respond?session_token=${encodeURIComponent(token)}`, {
+          method: 'POST',
+          headers: request.headers,
+          body: request.body,
+        }),
+      );
+    }
+
+    // Info
+    if (pathname === '/api/v1/serve/info' && request.method === 'GET') {
+      const sessionId = url.searchParams.get('session') ?? '';
+      if (!isValidSessionId(sessionId)) {
+        return Response.json({ ok: false, error: 'invalid session' }, { status: 400 });
+      }
+      const session = gitServeSessions.get(sessionId);
+      if (!session) {
+        return Response.json({ ok: false, error: 'session not found' }, { status: 404 });
+      }
+      const token = url.searchParams.get('session_token') ?? request.headers.get('x-session-token') ?? '';
+      return session.fetch(
+        new Request(`http://localhost/info?session_token=${encodeURIComponent(token)}`),
+      );
+    }
+
+    // Fallback to relay service
+    return relayService.fetch(request);
+  }
+
+  function cleanup() {
+    for (const session of gitServeSessions.values()) {
+      session.cleanup();
+    }
+    gitServeSessions.clear();
+  }
+
+  return { handleRequest, gitServeSessions, cleanup };
+}
+
+Deno.test('named session - register with verified sender returns sender/repo session_id', async () => {
+  const signer = await createSignerWithRawKey();
+  const mockFetch = createMockGitHubFetch([signer.rawKey]);
+  const service = createMemoryRelayService({ fetchFn: mockFetch });
+  const { handleRequest, cleanup } = createServeTestHandler(service);
+
+  try {
+    // Register key
+    await service.fetch(
+      await signedPublishRequest({
+        url: 'http://relay.local/api/v1/publish',
+        signer,
+        sender: 'mizchi',
+        room: 'main',
+        id: 'ns1',
+        payload: { data: 1 },
+      }),
+    );
+
+    // Verify GitHub
+    await service.fetch(
+      new Request('http://relay.local/api/v1/key/verify-github', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ sender: 'mizchi', github_username: 'mizchi' }),
+      }),
+    );
+
+    // Register named session
+    const res = await handleRequest(
+      new Request('http://relay.local/api/v1/serve/register?sender=mizchi&repo=bit-relay', {
+        method: 'POST',
+      }),
+    );
+    assertEquals(res.status, 200);
+    const body = await res.json();
+    assertEquals(body.ok, true);
+    assertEquals(body.session_id, 'mizchi/bit-relay');
+  } finally {
+    cleanup();
+  }
+});
+
+Deno.test('named session - register with unverified sender returns random session_id', async () => {
+  const service = createMemoryRelayService({});
+  const { handleRequest, cleanup } = createServeTestHandler(service);
+
+  try {
+    // Register without any key registration / verification
+    const res = await handleRequest(
+      new Request('http://relay.local/api/v1/serve/register?sender=unknown&repo=my-repo', {
+        method: 'POST',
+      }),
+    );
+    assertEquals(res.status, 200);
+    const body = await res.json();
+    assertEquals(body.ok, true);
+    // Should be a random ID (not named)
+    assertMatch(body.session_id, SESSION_ID_PATTERN);
+  } finally {
+    cleanup();
+  }
+});
+
+Deno.test('named session - register without sender/repo returns random session_id', async () => {
+  const service = createMemoryRelayService({});
+  const { handleRequest, cleanup } = createServeTestHandler(service);
+
+  try {
+    const res = await handleRequest(
+      new Request('http://relay.local/api/v1/serve/register', { method: 'POST' }),
+    );
+    assertEquals(res.status, 200);
+    const body = await res.json();
+    assertEquals(body.ok, true);
+    assertMatch(body.session_id, SESSION_ID_PATTERN);
+  } finally {
+    cleanup();
+  }
+});
+
+Deno.test('named session - git route routes to named session', async () => {
+  const signer = await createSignerWithRawKey();
+  const mockFetch = createMockGitHubFetch([signer.rawKey]);
+  const service = createMemoryRelayService({ fetchFn: mockFetch });
+  const { handleRequest, cleanup } = createServeTestHandler(service);
+
+  try {
+    // Register key + verify
+    await service.fetch(
+      await signedPublishRequest({
+        url: 'http://relay.local/api/v1/publish',
+        signer,
+        sender: 'mizchi',
+        room: 'main',
+        id: 'ns-git1',
+        payload: { data: 1 },
+      }),
+    );
+    await service.fetch(
+      new Request('http://relay.local/api/v1/key/verify-github', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ sender: 'mizchi', github_username: 'mizchi' }),
+      }),
+    );
+
+    // Register named session
+    const regRes = await handleRequest(
+      new Request('http://relay.local/api/v1/serve/register?sender=mizchi&repo=bit-relay', {
+        method: 'POST',
+      }),
+    );
+    const regBody = await regRes.json();
+    assertEquals(regBody.session_id, 'mizchi/bit-relay');
+    const sessionToken = regBody.session_token;
+
+    // Use a short timeout poll to verify the session is reachable
+    const pollRes = await handleRequest(
+      new Request(
+        `http://relay.local/api/v1/serve/poll?session=mizchi/bit-relay&timeout=1&session_token=${sessionToken}`,
+      ),
+    );
+    assertEquals(pollRes.status, 200);
+    const pollBody = await pollRes.json();
+    assertEquals(pollBody.ok, true);
+    assertEquals(Array.isArray(pollBody.requests), true);
+  } finally {
+    cleanup();
+  }
+});
+
+Deno.test('named session - poll/respond/info with owner/repo session param', async () => {
+  const signer = await createSignerWithRawKey();
+  const mockFetch = createMockGitHubFetch([signer.rawKey]);
+  const service = createMemoryRelayService({ fetchFn: mockFetch });
+  const { handleRequest, cleanup } = createServeTestHandler(service);
+
+  try {
+    // Register key + verify
+    await service.fetch(
+      await signedPublishRequest({
+        url: 'http://relay.local/api/v1/publish',
+        signer,
+        sender: 'mizchi',
+        room: 'main',
+        id: 'ns-api1',
+        payload: { data: 1 },
+      }),
+    );
+    await service.fetch(
+      new Request('http://relay.local/api/v1/key/verify-github', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ sender: 'mizchi', github_username: 'mizchi' }),
+      }),
+    );
+
+    // Register named session
+    const regRes = await handleRequest(
+      new Request('http://relay.local/api/v1/serve/register?sender=mizchi&repo=bit-relay', {
+        method: 'POST',
+      }),
+    );
+    const regBody = await regRes.json();
+    const sessionToken = regBody.session_token;
+
+    // Info
+    const infoRes = await handleRequest(
+      new Request(
+        `http://relay.local/api/v1/serve/info?session=mizchi/bit-relay&session_token=${sessionToken}`,
+      ),
+    );
+    assertEquals(infoRes.status, 200);
+    const infoBody = await infoRes.json();
+    assertEquals(infoBody.ok, true);
+    assertEquals(infoBody.active, true);
+  } finally {
+    cleanup();
+  }
+});
+
+Deno.test('named session - re-register overwrites existing session', async () => {
+  const signer = await createSignerWithRawKey();
+  const mockFetch = createMockGitHubFetch([signer.rawKey]);
+  const service = createMemoryRelayService({ fetchFn: mockFetch });
+  const { handleRequest, cleanup } = createServeTestHandler(service);
+
+  try {
+    // Register key + verify
+    await service.fetch(
+      await signedPublishRequest({
+        url: 'http://relay.local/api/v1/publish',
+        signer,
+        sender: 'mizchi',
+        room: 'main',
+        id: 'ns-reregister1',
+        payload: { data: 1 },
+      }),
+    );
+    await service.fetch(
+      new Request('http://relay.local/api/v1/key/verify-github', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ sender: 'mizchi', github_username: 'mizchi' }),
+      }),
+    );
+
+    // First register
+    const reg1 = await handleRequest(
+      new Request('http://relay.local/api/v1/serve/register?sender=mizchi&repo=bit-relay', {
+        method: 'POST',
+      }),
+    );
+    const body1 = await reg1.json();
+    assertEquals(body1.session_id, 'mizchi/bit-relay');
+    const token1 = body1.session_token;
+
+    // Second register (re-register)
+    const reg2 = await handleRequest(
+      new Request('http://relay.local/api/v1/serve/register?sender=mizchi&repo=bit-relay', {
+        method: 'POST',
+      }),
+    );
+    const body2 = await reg2.json();
+    assertEquals(body2.session_id, 'mizchi/bit-relay');
+    const token2 = body2.session_token;
+
+    // Old token should no longer work
+    const infoOld = await handleRequest(
+      new Request(
+        `http://relay.local/api/v1/serve/info?session=mizchi/bit-relay&session_token=${token1}`,
+      ),
+    );
+    assertEquals(infoOld.status, 403);
+
+    // New token should work
+    const infoNew = await handleRequest(
+      new Request(
+        `http://relay.local/api/v1/serve/info?session=mizchi/bit-relay&session_token=${token2}`,
+      ),
+    );
+    assertEquals(infoNew.status, 200);
+    const infoBody = await infoNew.json();
+    assertEquals(infoBody.ok, true);
+  } finally {
+    cleanup();
+  }
+});
+
+Deno.test('isValidSessionId accepts both random and named formats', () => {
+  // Random IDs
+  assertEquals(isValidSessionId('abcDEF12'), true);
+  assertEquals(isValidSessionId('ABCDEF'), true);
+  assertEquals(isValidSessionId('1234567890123456'), true);
+
+  // Named IDs
+  assertEquals(isValidSessionId('mizchi/bit-relay'), true);
+  assertEquals(isValidSessionId('user.name/repo_name'), true);
+  assertEquals(isValidSessionId('a/b'), true);
+
+  // Invalid
+  assertEquals(isValidSessionId(''), false);
+  assertEquals(isValidSessionId('abc'), false); // too short for random
+  assertEquals(isValidSessionId('/repo'), false); // no owner
+  assertEquals(isValidSessionId('owner/'), false); // no repo
+  assertEquals(isValidSessionId('a//b'), false); // double slash
 });
