@@ -9,6 +9,7 @@ import { createMemoryRelayService } from '../src/memory_handler.ts';
 function mockRun(
   table: Record<string, { stdout?: string; stderr?: string; code?: number }>,
 ): RunFn {
+  // deno-lint-ignore require-await
   return async (cmd) => {
     const key = cmd.join(' ');
     for (const [pattern, result] of Object.entries(table)) {
@@ -158,6 +159,7 @@ Deno.test('issue_list returns empty message when no issues', async () => {
 
 Deno.test('relay_sync calls bit hub sync', async () => {
   const calls: string[][] = [];
+  // deno-lint-ignore require-await
   const run: RunFn = async (cmd) => {
     calls.push(cmd);
     return { stdout: 'synced 3 records', stderr: '', code: 0 };
