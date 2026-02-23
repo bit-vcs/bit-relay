@@ -367,28 +367,35 @@ export class RelayRoom {
 }
 
 const worker = {
-  fetch(request: Request, env: RelayWorkerEnv): Promise<Response> | Response {
+  async fetch(request: Request, env: RelayWorkerEnv): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === '/health') {
       return healthResponse();
     }
 
     // Git serve session routes: /git/<session_id>/...
-    // 1. Named session: /git/owner/repo/path...
+    // Both named (owner/repo/path) and random (randomId/path) patterns can
+    // match the same URL (e.g. /git/AbCdEfGh/info/refs).  When ambiguous,
+    // try named first; if that session isn't active, fall back to random.
     const namedGitMatch = url.pathname.match(
       /^\/git\/([A-Za-z0-9][A-Za-z0-9._-]*)\/([A-Za-z0-9][A-Za-z0-9._-]*)\/(.*)/,
     );
-    if (namedGitMatch) {
+    const randomGitMatch = url.pathname.match(/^\/git\/([A-Za-z0-9]{6,16})\/(.*)/);
+
+    if (namedGitMatch && env.GIT_SERVE_SESSION) {
       const candidateId = `${namedGitMatch[1]}/${namedGitMatch[2]}`;
-      // Named sessions always go to DO — the DO will return 404 if not active
-      if (env.GIT_SERVE_SESSION) {
-        return handleGitRoute(candidateId, namedGitMatch[3], request, env);
+      if (randomGitMatch) {
+        // Ambiguous: could be named or random session.
+        // Try named first, fall back to random if not active.
+        const response = await handleGitRoute(candidateId, namedGitMatch[3], request, env);
+        if (response.status !== 404) {
+          return response;
+        }
+        return handleGitRoute(randomGitMatch[1], randomGitMatch[2], request, env);
       }
-      // fallthrough: try as random ID
+      return handleGitRoute(candidateId, namedGitMatch[3], request, env);
     }
 
-    // 2. Random session: /git/randomId/path...
-    const randomGitMatch = url.pathname.match(/^\/git\/([A-Za-z0-9]{6,16})\/(.*)/);
     if (randomGitMatch) {
       return handleGitRoute(randomGitMatch[1], randomGitMatch[2], request, env);
     }
