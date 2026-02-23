@@ -13,9 +13,9 @@ import {
   DEFAULT_WS_PING_INTERVAL_MS,
   healthResponse,
   isValidRoomName,
+  type IdentitySnapshot,
   type MemoryRelayOptions,
   type MemoryRelayService,
-  type RelaySnapshot,
 } from './memory_handler.ts';
 import { GitServeSession } from './git_serve_session.ts';
 
@@ -31,6 +31,7 @@ interface DurableObjectNamespaceLike {
 interface DurableObjectStorageLike {
   get(key: string): Promise<unknown>;
   put(key: string, value: unknown): Promise<void>;
+  delete(key: string): Promise<boolean>;
 }
 
 interface DurableObjectStateLike {
@@ -60,7 +61,7 @@ export interface RelayWorkerEnv {
   GIT_SERVE_SESSION_TTL_SEC?: string;
 }
 
-const SNAPSHOT_KEY = 'relay_snapshot_v1';
+const IDENTITY_KEY = 'relay_identity_v1';
 let fallbackService: MemoryRelayService | null = null;
 
 function parsePositiveInt(raw: string | undefined, fallback: number): number {
@@ -334,13 +335,24 @@ export class RelayRoom {
     this.service = createMemoryRelayService(buildOptions(env));
     const restore = async () => {
       try {
-        const snapshot = await this.state.storage.get(SNAPSHOT_KEY);
-        if (!snapshot || typeof snapshot !== 'object') {
+        // Try identity-only snapshot first (v1), fall back to legacy full snapshot
+        const identity = await this.state.storage.get(IDENTITY_KEY);
+        if (identity && typeof identity === 'object') {
+          this.service.restoreIdentity(identity as IdentitySnapshot);
           return;
         }
-        this.service.restore(snapshot as RelaySnapshot);
+        // Legacy: migrate from full snapshot if present
+        const legacy = await this.state.storage.get('relay_snapshot_v1');
+        if (legacy && typeof legacy === 'object') {
+          const legacyData = legacy as Record<string, unknown>;
+          if (legacyData.keys_by_sender || legacyData.nonces_by_sender) {
+            this.service.restoreIdentity(legacyData as IdentitySnapshot);
+          }
+          // Clean up legacy key
+          await this.state.storage.delete('relay_snapshot_v1');
+        }
       } catch {
-        console.error('Failed to restore relay snapshot; starting fresh');
+        console.error('Failed to restore relay identity; starting fresh');
       }
     };
     if (typeof this.state.blockConcurrencyWhile === 'function') {
@@ -354,22 +366,19 @@ export class RelayRoom {
     await this.ready;
     const response = await this.service.fetch(request);
 
+    // Persist identity (keys + nonces) on operations that modify them.
+    // Messages, acks, and presence are ephemeral — not persisted.
     const pathname = new URL(request.url).pathname;
     if (
       pathname === '/api/v1/publish' ||
-      pathname === '/api/v1/inbox/ack' ||
-      pathname === '/api/v1/presence/heartbeat' ||
       pathname === '/api/v1/key/rotate' ||
       pathname === '/api/v1/key/verify-github' ||
-      (pathname === '/api/v1/presence' && request.method === 'DELETE') ||
       (pathname === '/api/v1/review' && request.method === 'POST')
     ) {
       try {
-        await this.state.storage.put(SNAPSHOT_KEY, this.service.snapshot());
+        await this.state.storage.put(IDENTITY_KEY, this.service.identitySnapshot());
       } catch {
-        // Snapshot may exceed Durable Object storage limit (128 KiB).
-        // The in-memory state is still valid; persistence is best-effort.
-        console.error('Failed to persist relay snapshot (likely size limit exceeded)');
+        console.error('Failed to persist relay identity');
       }
     }
     return response;

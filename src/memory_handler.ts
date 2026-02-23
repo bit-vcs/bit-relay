@@ -126,6 +126,11 @@ export interface RelaySnapshot {
   nonces_by_sender: Record<string, Record<string, number>>;
 }
 
+export interface IdentitySnapshot {
+  keys_by_sender: Record<string, SnapshotKeyRecord>;
+  nonces_by_sender: Record<string, Record<string, number>>;
+}
+
 export interface MemoryRelayOptions {
   authToken?: string;
   maxMessagesPerRoom?: number;
@@ -150,6 +155,8 @@ export interface MemoryRelayService {
   fetch(request: Request): Promise<Response>;
   snapshot(): RelaySnapshot;
   restore(snapshot: RelaySnapshot): void;
+  identitySnapshot(): IdentitySnapshot;
+  restoreIdentity(snapshot: IdentitySnapshot): void;
   close(): void;
 }
 
@@ -1725,6 +1732,86 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
     };
   }
 
+  function identitySnapshot(): IdentitySnapshot {
+    const keysBySender: Record<string, SnapshotKeyRecord> = {};
+    for (const [sender, key] of keyRegistry.entries()) {
+      keysBySender[sender] = {
+        public_key: key.publicKey,
+        status: key.status,
+        first_seen_at: key.firstSeenAt,
+        last_seen_at: key.lastSeenAt,
+        rotated_at: key.rotatedAt,
+        revoked_at: key.revokedAt,
+        github_username: key.githubUsername,
+        github_verified_at: key.githubVerifiedAt,
+      };
+    }
+
+    const noncesData: Record<string, Record<string, number>> = {};
+    for (const [sender, nonces] of noncesBySender.entries()) {
+      const senderNonces: Record<string, number> = {};
+      for (const [nonce, ts] of nonces.entries()) {
+        senderNonces[nonce] = ts;
+      }
+      noncesData[sender] = senderNonces;
+    }
+
+    return {
+      keys_by_sender: keysBySender,
+      nonces_by_sender: noncesData,
+    };
+  }
+
+  function restoreIdentity(snapshotData: IdentitySnapshot): void {
+    keyRegistry.clear();
+    noncesBySender.clear();
+
+    if (!isObjectRecord(snapshotData)) {
+      return;
+    }
+
+    if (isObjectRecord(snapshotData.keys_by_sender)) {
+      for (const [sender, value] of Object.entries(snapshotData.keys_by_sender)) {
+        if (!isObjectRecord(value)) continue;
+        const publicKey = (typeof value.public_key === 'string' ? value.public_key : '').trim();
+        if (sender.trim().length === 0 || publicKey.length === 0) continue;
+        const status: KeyStatus = value.status === 'revoked' ? 'revoked' : 'active';
+        keyRegistry.set(sender, {
+          publicKey,
+          status,
+          firstSeenAt: typeof value.first_seen_at === 'number'
+            ? Math.trunc(value.first_seen_at)
+            : 0,
+          lastSeenAt: typeof value.last_seen_at === 'number' ? Math.trunc(value.last_seen_at) : 0,
+          rotatedAt: typeof value.rotated_at === 'number' ? Math.trunc(value.rotated_at) : null,
+          revokedAt: typeof value.revoked_at === 'number' ? Math.trunc(value.revoked_at) : null,
+          githubUsername: typeof value.github_username === 'string' ? value.github_username : null,
+          githubVerifiedAt: typeof value.github_verified_at === 'number'
+            ? Math.trunc(value.github_verified_at)
+            : null,
+        });
+      }
+    }
+
+    if (isObjectRecord(snapshotData.nonces_by_sender)) {
+      const nowSec = nowEpochSec();
+      for (const [sender, value] of Object.entries(snapshotData.nonces_by_sender)) {
+        if (!isObjectRecord(value)) continue;
+        const map = new Map<string, number>();
+        for (const [nonce, tsRaw] of Object.entries(value)) {
+          if (nonce.trim().length === 0) continue;
+          if (typeof tsRaw !== 'number' || !Number.isFinite(tsRaw)) continue;
+          const ts = Math.trunc(tsRaw);
+          if (nowSec - ts > nonceTtlSec) continue;
+          map.set(nonce, ts);
+        }
+        if (map.size > 0) {
+          noncesBySender.set(sender, map);
+        }
+      }
+    }
+  }
+
   function restore(snapshotData: RelaySnapshot): void {
     rooms.clear();
     keyRegistry.clear();
@@ -1883,6 +1970,8 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
     fetch,
     snapshot,
     restore,
+    identitySnapshot,
+    restoreIdentity,
     close,
   };
 }
