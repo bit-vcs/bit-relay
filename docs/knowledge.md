@@ -23,16 +23,14 @@ snapshot = messages (最大1000件 × 最大64KB) + keys + nonces
 - `storage.put()` / `storage.get()` を try-catch でラップ
 - persistence は best-effort とし、失敗してもリクエストは成功を返す
 
-### 根本対策（TODO）
+### 根本対策（実装済み）
 
-スナップショットの分割永続化を実装する:
+identity-only 永続化に変更:
 
-1. **keys/nonces は必須永続化**: TOFU の鍵レジストリと nonce は DO 再起動後も維持が必要。これだけなら 128 KiB に収まる
-2. **messages は揮発性でよい**: メッセージはクライアントが poll で取得するもの。DO 再起動で消えても、クライアントは next cursor から再取得するだけ
-3. **分割案**:
-   - `relay_keys_v1`: keys_by_sender + nonces_by_sender
-   - `relay_rooms_v1:{room}`: room ごとのメッセージ（上限制御付き）
-   - または messages の永続化自体をやめる
+- **`relay_identity_v1`**: keys_by_sender + nonces_by_sender のみ永続化（TOFU の鍵レジストリと replay 防止の nonce）
+- **messages/acks/presence/reviews**: 揮発性（in-memory only）。DO 再起動で消えるが、クライアントは poll cursor から再取得するだけ
+- 旧 `relay_snapshot_v1` からの自動マイグレーション付き（初回起動時に identity 部分だけ抽出して移行、旧キーは削除）
+- `storage.put()` / `storage.get()` は引き続き try-catch でラップ
 
 ### Cloudflare DO storage の制約まとめ
 
