@@ -303,7 +303,11 @@ Deno.test('verifyKeyAgainstGitHub - matching key returns verified', async () => 
   const mockFetch = (_url: string | URL | Request) =>
     Promise.resolve(new Response(`ssh-ed25519 ${blob} user@host`, { status: 200 }));
 
-  const result = await verifyKeyAgainstGitHub(b64url, 'testuser', mockFetch as typeof globalThis.fetch);
+  const result = await verifyKeyAgainstGitHub(
+    b64url,
+    'testuser',
+    mockFetch as typeof globalThis.fetch,
+  );
   assertEquals(result.verified, true);
   assertEquals(result.error, undefined);
 });
@@ -317,7 +321,11 @@ Deno.test('verifyKeyAgainstGitHub - non-matching key returns not verified', asyn
   const mockFetch = (_url: string | URL | Request) =>
     Promise.resolve(new Response(`ssh-ed25519 ${blob} user@host`, { status: 200 }));
 
-  const result = await verifyKeyAgainstGitHub(b64url, 'testuser', mockFetch as typeof globalThis.fetch);
+  const result = await verifyKeyAgainstGitHub(
+    b64url,
+    'testuser',
+    mockFetch as typeof globalThis.fetch,
+  );
   assertEquals(result.verified, false);
 });
 
@@ -325,10 +333,13 @@ Deno.test('verifyKeyAgainstGitHub - fetch error returns not verified with error'
   const key = randomKey();
   const b64url = base64UrlEncode(key);
 
-  const mockFetch = (_url: string | URL | Request) =>
-    Promise.reject(new Error('network failure'));
+  const mockFetch = (_url: string | URL | Request) => Promise.reject(new Error('network failure'));
 
-  const result = await verifyKeyAgainstGitHub(b64url, 'testuser', mockFetch as typeof globalThis.fetch);
+  const result = await verifyKeyAgainstGitHub(
+    b64url,
+    'testuser',
+    mockFetch as typeof globalThis.fetch,
+  );
   assertEquals(result.verified, false);
   assertEquals(result.error, 'network failure');
 });
@@ -340,7 +351,11 @@ Deno.test('verifyKeyAgainstGitHub - no ed25519 keys returns not verified', async
   const mockFetch = (_url: string | URL | Request) =>
     Promise.resolve(new Response('ssh-rsa AAAA... user@host\n', { status: 200 }));
 
-  const result = await verifyKeyAgainstGitHub(b64url, 'testuser', mockFetch as typeof globalThis.fetch);
+  const result = await verifyKeyAgainstGitHub(
+    b64url,
+    'testuser',
+    mockFetch as typeof globalThis.fetch,
+  );
   assertEquals(result.verified, false);
   assertEquals(result.error, 'no ed25519 keys found for github user');
 });

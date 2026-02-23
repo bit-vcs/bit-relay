@@ -98,12 +98,22 @@ function parseOpenSshPrivateKey(pemText: string): { seed: Uint8Array; publicKey:
 function wrapEd25519SeedAsPkcs8(seed: Uint8Array): Uint8Array {
   // ASN.1 DER: SEQUENCE { version INTEGER 0, algorithm SEQUENCE { OID 1.3.101.112 }, key OCTET STRING { OCTET STRING { seed } } }
   const prefix = new Uint8Array([
-    0x30, 0x2e, // SEQUENCE (46 bytes)
-    0x02, 0x01, 0x00, // INTEGER 0
-    0x30, 0x05, // SEQUENCE (5 bytes)
-    0x06, 0x03, 0x2b, 0x65, 0x70, // OID 1.3.101.112
-    0x04, 0x22, // OCTET STRING (34 bytes)
-    0x04, 0x20, // OCTET STRING (32 bytes)
+    0x30,
+    0x2e, // SEQUENCE (46 bytes)
+    0x02,
+    0x01,
+    0x00, // INTEGER 0
+    0x30,
+    0x05, // SEQUENCE (5 bytes)
+    0x06,
+    0x03,
+    0x2b,
+    0x65,
+    0x70, // OID 1.3.101.112
+    0x04,
+    0x22, // OCTET STRING (34 bytes)
+    0x04,
+    0x20, // OCTET STRING (32 bytes)
   ]);
   const pkcs8 = new Uint8Array(prefix.length + 32);
   pkcs8.set(prefix);
@@ -163,7 +173,8 @@ const sigBytes = new Uint8Array(
 );
 const signature = base64UrlEncode(sigBytes);
 
-const publishUrl = `http://localhost/api/v1/publish?sender=${sender}&room=${room}&id=${id}&topic=${topic}`;
+const publishUrl =
+  `http://localhost/api/v1/publish?sender=${sender}&room=${room}&id=${id}&topic=${topic}`;
 const publishReq = new Request(publishUrl, {
   method: 'POST',
   headers: {

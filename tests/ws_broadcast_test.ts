@@ -28,8 +28,10 @@ function startTestServer(opts?: MemoryRelayOptions): TestServer {
     requireSignatures: false,
     ...opts,
   });
-  const server = Deno.serve({ port, hostname: '127.0.0.1', onListen() {} }, (request) =>
-    service.fetch(request));
+  const server = Deno.serve(
+    { port, hostname: '127.0.0.1', onListen() {} },
+    (request) => service.fetch(request),
+  );
   return {
     port,
     server,

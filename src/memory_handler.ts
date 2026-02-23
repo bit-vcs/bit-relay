@@ -1151,9 +1151,8 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
     }
 
     const sender = (typeof parsed.sender === 'string' ? parsed.sender : '').trim();
-    const githubUsername = (typeof parsed.github_username === 'string'
-      ? parsed.github_username
-      : '').trim();
+    const githubUsername =
+      (typeof parsed.github_username === 'string' ? parsed.github_username : '').trim();
 
     if (sender.length === 0) {
       return toErrorResponse('missing field: sender', 400);
@@ -1812,9 +1811,7 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
             if (rSender.length === 0 || rPrId.length === 0) continue;
             if (!VALID_VERDICTS.has(rVerdict)) continue;
             if (!PR_ID_PATTERN.test(rPrId)) continue;
-            const submittedAt = typeof r.submitted_at === 'number'
-              ? Math.trunc(r.submitted_at)
-              : 0;
+            const submittedAt = typeof r.submitted_at === 'number' ? Math.trunc(r.submitted_at) : 0;
             const updatedAt = typeof r.updated_at === 'number' ? Math.trunc(r.updated_at) : 0;
             let prReviews = roomState.reviewsByPr.get(rPrId);
             if (!prReviews) {

@@ -111,8 +111,7 @@ function optionsFromEnv(): MemoryRelayOptions {
 }
 
 const SESSION_ID_PATTERN = /^[A-Za-z0-9]{6,16}$/;
-const NAMED_SESSION_PATTERN =
-  /^[A-Za-z0-9][A-Za-z0-9._-]{0,38}\/[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const NAMED_SESSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,38}\/[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 function isValidSessionId(id: string): boolean {
   return SESSION_ID_PATTERN.test(id) || NAMED_SESSION_PATTERN.test(id);

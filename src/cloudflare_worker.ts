@@ -130,7 +130,8 @@ function buildOptions(env: RelayWorkerEnv): MemoryRelayOptions {
     nonceTtlSec: parsePositiveInt(env.RELAY_NONCE_TTL_SEC, 600),
     maxNoncesPerSender: parsePositiveInt(env.RELAY_MAX_NONCES_PER_SENDER, 2048),
     presenceTtlSec: parsePositiveInt(env.RELAY_PRESENCE_TTL_SEC, DEFAULT_PRESENCE_TTL_SEC),
-    wsPingIntervalMs: parsePositiveInt(env.WS_PING_INTERVAL_SEC, DEFAULT_WS_PING_INTERVAL_MS / 1000) *
+    wsPingIntervalMs:
+      parsePositiveInt(env.WS_PING_INTERVAL_SEC, DEFAULT_WS_PING_INTERVAL_MS / 1000) *
       1000,
     wsIdleTimeoutMs: parsePositiveInt(env.WS_IDLE_TIMEOUT_SEC, DEFAULT_WS_IDLE_TIMEOUT_MS / 1000) *
       1000,
@@ -142,8 +143,7 @@ function isRelayRoute(pathname: string): boolean {
 }
 
 const SESSION_ID_PATTERN = /^[A-Za-z0-9]{6,16}$/;
-const NAMED_SESSION_PATTERN =
-  /^[A-Za-z0-9][A-Za-z0-9._-]{0,38}\/[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const NAMED_SESSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,38}\/[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 function isValidSessionId(id: string): boolean {
   return SESSION_ID_PATTERN.test(id) || NAMED_SESSION_PATTERN.test(id);

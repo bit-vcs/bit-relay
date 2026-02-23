@@ -1,13 +1,6 @@
 import { assertEquals, assertObjectMatch } from '@std/assert';
-import {
-  createMemoryRelayHandler,
-  createMemoryRelayService,
-} from '../src/memory_handler.ts';
-import {
-  base64UrlEncode,
-  buildReviewSigningMessage,
-  signEd25519,
-} from '../src/signing.ts';
+import { createMemoryRelayHandler, createMemoryRelayService } from '../src/memory_handler.ts';
+import { base64UrlEncode, buildReviewSigningMessage, signEd25519 } from '../src/signing.ts';
 
 interface TestSigner {
   publicKey: string;
@@ -104,13 +97,15 @@ Deno.test('review: approve vote is recorded and retrievable', async () => {
   const handler = createMemoryRelayHandler({});
   const signer = await createSigner();
 
-  const postRes = await handler(await signedReviewRequest({
-    signer,
-    sender: 'alice',
-    room: 'myrepo',
-    prId: 'pr-1',
-    verdict: 'approve',
-  }));
+  const postRes = await handler(
+    await signedReviewRequest({
+      signer,
+      sender: 'alice',
+      room: 'myrepo',
+      prId: 'pr-1',
+      verdict: 'approve',
+    }),
+  );
   assertEquals(postRes.status, 200);
   const postBody = await postRes.json();
   assertObjectMatch(postBody, {
@@ -145,13 +140,15 @@ Deno.test('review: deny vote is recorded', async () => {
   const handler = createMemoryRelayHandler({});
   const signer = await createSigner();
 
-  const postRes = await handler(await signedReviewRequest({
-    signer,
-    sender: 'bob',
-    room: 'myrepo',
-    prId: 'pr-2',
-    verdict: 'deny',
-  }));
+  const postRes = await handler(
+    await signedReviewRequest({
+      signer,
+      sender: 'bob',
+      room: 'myrepo',
+      prId: 'pr-2',
+      verdict: 'deny',
+    }),
+  );
   assertEquals(postRes.status, 200);
   const postBody = await postRes.json();
   assertObjectMatch(postBody, {
@@ -168,21 +165,25 @@ Deno.test('review: same sender can overwrite vote', async () => {
   const handler = createMemoryRelayHandler({});
   const signer = await createSigner();
 
-  await handler(await signedReviewRequest({
-    signer,
-    sender: 'alice',
-    room: 'myrepo',
-    prId: 'pr-3',
-    verdict: 'deny',
-  }));
+  await handler(
+    await signedReviewRequest({
+      signer,
+      sender: 'alice',
+      room: 'myrepo',
+      prId: 'pr-3',
+      verdict: 'deny',
+    }),
+  );
 
-  const updateRes = await handler(await signedReviewRequest({
-    signer,
-    sender: 'alice',
-    room: 'myrepo',
-    prId: 'pr-3',
-    verdict: 'approve',
-  }));
+  const updateRes = await handler(
+    await signedReviewRequest({
+      signer,
+      sender: 'alice',
+      room: 'myrepo',
+      prId: 'pr-3',
+      verdict: 'approve',
+    }),
+  );
   assertEquals(updateRes.status, 200);
   const body = await updateRes.json();
   assertObjectMatch(body, {
@@ -207,20 +208,24 @@ Deno.test('review: 1 approve + 1 deny → resolved (50%)', async () => {
   const signerA = await createSigner();
   const signerB = await createSigner();
 
-  await handler(await signedReviewRequest({
-    signer: signerA,
-    sender: 'alice',
-    room: 'repo',
-    prId: 'pr-t1',
-    verdict: 'approve',
-  }));
-  await handler(await signedReviewRequest({
-    signer: signerB,
-    sender: 'bob',
-    room: 'repo',
-    prId: 'pr-t1',
-    verdict: 'deny',
-  }));
+  await handler(
+    await signedReviewRequest({
+      signer: signerA,
+      sender: 'alice',
+      room: 'repo',
+      prId: 'pr-t1',
+      verdict: 'approve',
+    }),
+  );
+  await handler(
+    await signedReviewRequest({
+      signer: signerB,
+      sender: 'bob',
+      room: 'repo',
+      prId: 'pr-t1',
+      verdict: 'deny',
+    }),
+  );
 
   const getRes = await handler(reviewGetRequest({ room: 'repo', prId: 'pr-t1' }));
   const body = await getRes.json();
@@ -235,27 +240,33 @@ Deno.test('review: 1 approve + 2 deny → unresolved', async () => {
   const signerB = await createSigner();
   const signerC = await createSigner();
 
-  await handler(await signedReviewRequest({
-    signer: signerA,
-    sender: 'alice',
-    room: 'repo',
-    prId: 'pr-t2',
-    verdict: 'approve',
-  }));
-  await handler(await signedReviewRequest({
-    signer: signerB,
-    sender: 'bob',
-    room: 'repo',
-    prId: 'pr-t2',
-    verdict: 'deny',
-  }));
-  await handler(await signedReviewRequest({
-    signer: signerC,
-    sender: 'carol',
-    room: 'repo',
-    prId: 'pr-t2',
-    verdict: 'deny',
-  }));
+  await handler(
+    await signedReviewRequest({
+      signer: signerA,
+      sender: 'alice',
+      room: 'repo',
+      prId: 'pr-t2',
+      verdict: 'approve',
+    }),
+  );
+  await handler(
+    await signedReviewRequest({
+      signer: signerB,
+      sender: 'bob',
+      room: 'repo',
+      prId: 'pr-t2',
+      verdict: 'deny',
+    }),
+  );
+  await handler(
+    await signedReviewRequest({
+      signer: signerC,
+      sender: 'carol',
+      room: 'repo',
+      prId: 'pr-t2',
+      verdict: 'deny',
+    }),
+  );
 
   const getRes = await handler(reviewGetRequest({ room: 'repo', prId: 'pr-t2' }));
   const body = await getRes.json();
@@ -270,27 +281,33 @@ Deno.test('review: 2 approve + 1 deny → resolved', async () => {
   const signerB = await createSigner();
   const signerC = await createSigner();
 
-  await handler(await signedReviewRequest({
-    signer: signerA,
-    sender: 'alice',
-    room: 'repo',
-    prId: 'pr-t3',
-    verdict: 'approve',
-  }));
-  await handler(await signedReviewRequest({
-    signer: signerB,
-    sender: 'bob',
-    room: 'repo',
-    prId: 'pr-t3',
-    verdict: 'approve',
-  }));
-  await handler(await signedReviewRequest({
-    signer: signerC,
-    sender: 'carol',
-    room: 'repo',
-    prId: 'pr-t3',
-    verdict: 'deny',
-  }));
+  await handler(
+    await signedReviewRequest({
+      signer: signerA,
+      sender: 'alice',
+      room: 'repo',
+      prId: 'pr-t3',
+      verdict: 'approve',
+    }),
+  );
+  await handler(
+    await signedReviewRequest({
+      signer: signerB,
+      sender: 'bob',
+      room: 'repo',
+      prId: 'pr-t3',
+      verdict: 'approve',
+    }),
+  );
+  await handler(
+    await signedReviewRequest({
+      signer: signerC,
+      sender: 'carol',
+      room: 'repo',
+      prId: 'pr-t3',
+      verdict: 'deny',
+    }),
+  );
 
   const getRes = await handler(reviewGetRequest({ room: 'repo', prId: 'pr-t3' }));
   const body = await getRes.json();
@@ -328,18 +345,20 @@ Deno.test('review: missing sender returns 400', async () => {
   });
   const signature = await signEd25519(signer.privateKey, message);
 
-  const res = await handler(new Request(
-    'http://relay.local/api/v1/review?room=repo&pr_id=pr-1&verdict=approve',
-    {
-      method: 'POST',
-      headers: {
-        'x-relay-public-key': signer.publicKey,
-        'x-relay-signature': signature,
-        'x-relay-timestamp': String(ts),
-        'x-relay-nonce': nonce,
+  const res = await handler(
+    new Request(
+      'http://relay.local/api/v1/review?room=repo&pr_id=pr-1&verdict=approve',
+      {
+        method: 'POST',
+        headers: {
+          'x-relay-public-key': signer.publicKey,
+          'x-relay-signature': signature,
+          'x-relay-timestamp': String(ts),
+          'x-relay-nonce': nonce,
+        },
       },
-    },
-  ));
+    ),
+  );
   assertEquals(res.status, 400);
   const body = await res.json();
   assertEquals(body.error, 'missing query: sender');
@@ -360,18 +379,20 @@ Deno.test('review: missing pr_id returns 400', async () => {
   });
   const signature = await signEd25519(signer.privateKey, message);
 
-  const res = await handler(new Request(
-    'http://relay.local/api/v1/review?room=repo&sender=alice&verdict=approve',
-    {
-      method: 'POST',
-      headers: {
-        'x-relay-public-key': signer.publicKey,
-        'x-relay-signature': signature,
-        'x-relay-timestamp': String(ts),
-        'x-relay-nonce': nonce,
+  const res = await handler(
+    new Request(
+      'http://relay.local/api/v1/review?room=repo&sender=alice&verdict=approve',
+      {
+        method: 'POST',
+        headers: {
+          'x-relay-public-key': signer.publicKey,
+          'x-relay-signature': signature,
+          'x-relay-timestamp': String(ts),
+          'x-relay-nonce': nonce,
+        },
       },
-    },
-  ));
+    ),
+  );
   assertEquals(res.status, 400);
   const body = await res.json();
   assertEquals(body.error, 'missing query: pr_id');
@@ -392,18 +413,20 @@ Deno.test('review: invalid verdict returns 400', async () => {
   });
   const signature = await signEd25519(signer.privateKey, message);
 
-  const res = await handler(new Request(
-    'http://relay.local/api/v1/review?room=repo&sender=alice&pr_id=pr-1&verdict=maybe',
-    {
-      method: 'POST',
-      headers: {
-        'x-relay-public-key': signer.publicKey,
-        'x-relay-signature': signature,
-        'x-relay-timestamp': String(ts),
-        'x-relay-nonce': nonce,
+  const res = await handler(
+    new Request(
+      'http://relay.local/api/v1/review?room=repo&sender=alice&pr_id=pr-1&verdict=maybe',
+      {
+        method: 'POST',
+        headers: {
+          'x-relay-public-key': signer.publicKey,
+          'x-relay-signature': signature,
+          'x-relay-timestamp': String(ts),
+          'x-relay-nonce': nonce,
+        },
       },
-    },
-  ));
+    ),
+  );
   assertEquals(res.status, 400);
   const body = await res.json();
   assertEquals(body.error, 'invalid verdict');
@@ -424,18 +447,20 @@ Deno.test('review: invalid pr_id format returns 400', async () => {
   });
   const signature = await signEd25519(signer.privateKey, message);
 
-  const res = await handler(new Request(
-    'http://relay.local/api/v1/review?room=repo&sender=alice&pr_id=!invalid&verdict=approve',
-    {
-      method: 'POST',
-      headers: {
-        'x-relay-public-key': signer.publicKey,
-        'x-relay-signature': signature,
-        'x-relay-timestamp': String(ts),
-        'x-relay-nonce': nonce,
+  const res = await handler(
+    new Request(
+      'http://relay.local/api/v1/review?room=repo&sender=alice&pr_id=!invalid&verdict=approve',
+      {
+        method: 'POST',
+        headers: {
+          'x-relay-public-key': signer.publicKey,
+          'x-relay-signature': signature,
+          'x-relay-timestamp': String(ts),
+          'x-relay-nonce': nonce,
+        },
       },
-    },
-  ));
+    ),
+  );
   assertEquals(res.status, 400);
   const body = await res.json();
   assertEquals(body.error, 'invalid pr_id');
@@ -453,10 +478,12 @@ Deno.test('review: GET with missing pr_id returns 400', async () => {
 
 Deno.test('review: POST without signature returns 401', async () => {
   const handler = createMemoryRelayHandler({ requireSignatures: false });
-  const res = await handler(new Request(
-    'http://relay.local/api/v1/review?room=repo&sender=alice&pr_id=pr-1&verdict=approve',
-    { method: 'POST' },
-  ));
+  const res = await handler(
+    new Request(
+      'http://relay.local/api/v1/review?room=repo&sender=alice&pr_id=pr-1&verdict=approve',
+      { method: 'POST' },
+    ),
+  );
   assertEquals(res.status, 401);
   const body = await res.json();
   assertEquals(body.error, 'missing signature headers');
@@ -479,18 +506,20 @@ Deno.test('review: POST with invalid signature returns 401', async () => {
   });
   const signature = await signEd25519(wrongSigner.privateKey, message);
 
-  const res = await handler(new Request(
-    'http://relay.local/api/v1/review?room=repo&sender=alice&pr_id=pr-1&verdict=approve',
-    {
-      method: 'POST',
-      headers: {
-        'x-relay-public-key': signer.publicKey,
-        'x-relay-signature': signature,
-        'x-relay-timestamp': String(ts),
-        'x-relay-nonce': nonce,
+  const res = await handler(
+    new Request(
+      'http://relay.local/api/v1/review?room=repo&sender=alice&pr_id=pr-1&verdict=approve',
+      {
+        method: 'POST',
+        headers: {
+          'x-relay-public-key': signer.publicKey,
+          'x-relay-signature': signature,
+          'x-relay-timestamp': String(ts),
+          'x-relay-nonce': nonce,
+        },
       },
-    },
-  ));
+    ),
+  );
   assertEquals(res.status, 401);
   const body = await res.json();
   assertEquals(body.error, 'invalid signature');
@@ -502,22 +531,26 @@ Deno.test('review: TOFU mismatch returns 409', async () => {
   const signerB = await createSigner();
 
   // First request establishes TOFU
-  await handler(await signedReviewRequest({
-    signer: signerA,
-    sender: 'alice',
-    room: 'repo',
-    prId: 'pr-tofu',
-    verdict: 'approve',
-  }));
+  await handler(
+    await signedReviewRequest({
+      signer: signerA,
+      sender: 'alice',
+      room: 'repo',
+      prId: 'pr-tofu',
+      verdict: 'approve',
+    }),
+  );
 
   // Second request with different key for same sender
-  const res = await handler(await signedReviewRequest({
-    signer: signerB,
-    sender: 'alice',
-    room: 'repo',
-    prId: 'pr-tofu2',
-    verdict: 'approve',
-  }));
+  const res = await handler(
+    await signedReviewRequest({
+      signer: signerB,
+      sender: 'alice',
+      room: 'repo',
+      prId: 'pr-tofu2',
+      verdict: 'approve',
+    }),
+  );
   assertEquals(res.status, 409);
   const body = await res.json();
   assertEquals(body.error, 'sender key mismatch');
@@ -529,25 +562,29 @@ Deno.test('review: nonce replay returns 409', async () => {
   const fixedNonce = crypto.randomUUID();
   const ts = Math.floor(Date.now() / 1000);
 
-  await handler(await signedReviewRequest({
-    signer,
-    sender: 'alice',
-    room: 'repo',
-    prId: 'pr-nonce',
-    verdict: 'approve',
-    nonce: fixedNonce,
-    ts,
-  }));
+  await handler(
+    await signedReviewRequest({
+      signer,
+      sender: 'alice',
+      room: 'repo',
+      prId: 'pr-nonce',
+      verdict: 'approve',
+      nonce: fixedNonce,
+      ts,
+    }),
+  );
 
-  const res = await handler(await signedReviewRequest({
-    signer,
-    sender: 'alice',
-    room: 'repo',
-    prId: 'pr-nonce',
-    verdict: 'deny',
-    nonce: fixedNonce,
-    ts,
-  }));
+  const res = await handler(
+    await signedReviewRequest({
+      signer,
+      sender: 'alice',
+      room: 'repo',
+      prId: 'pr-nonce',
+      verdict: 'deny',
+      nonce: fixedNonce,
+      ts,
+    }),
+  );
   assertEquals(res.status, 409);
   const body = await res.json();
   assertEquals(body.error, 'replayed nonce');
@@ -561,13 +598,15 @@ Deno.test('review: POST without room token returns 403', async () => {
   });
   const signer = await createSigner();
 
-  const res = await handler(await signedReviewRequest({
-    signer,
-    sender: 'alice',
-    room: 'repo',
-    prId: 'pr-rt',
-    verdict: 'approve',
-  }));
+  const res = await handler(
+    await signedReviewRequest({
+      signer,
+      sender: 'alice',
+      room: 'repo',
+      prId: 'pr-rt',
+      verdict: 'approve',
+    }),
+  );
   assertEquals(res.status, 403);
 });
 
@@ -577,14 +616,16 @@ Deno.test('review: POST with valid room token succeeds', async () => {
   });
   const signer = await createSigner();
 
-  const res = await handler(await signedReviewRequest({
-    signer,
-    sender: 'alice',
-    room: 'repo',
-    prId: 'pr-rt2',
-    verdict: 'approve',
-    roomToken: 'secret-token',
-  }));
+  const res = await handler(
+    await signedReviewRequest({
+      signer,
+      sender: 'alice',
+      room: 'repo',
+      prId: 'pr-rt2',
+      verdict: 'approve',
+      roomToken: 'secret-token',
+    }),
+  );
   assertEquals(res.status, 200);
 });
 
@@ -603,13 +644,15 @@ Deno.test('review: POST without auth token returns 401 when authToken set', asyn
   const handler = createMemoryRelayHandler({ authToken: 'cluster-secret' });
   const signer = await createSigner();
 
-  const res = await handler(await signedReviewRequest({
-    signer,
-    sender: 'alice',
-    room: 'repo',
-    prId: 'pr-at',
-    verdict: 'approve',
-  }));
+  const res = await handler(
+    await signedReviewRequest({
+      signer,
+      sender: 'alice',
+      room: 'repo',
+      prId: 'pr-at',
+      verdict: 'approve',
+    }),
+  );
   assertEquals(res.status, 401);
 });
 
@@ -617,14 +660,16 @@ Deno.test('review: POST with valid auth token succeeds', async () => {
   const handler = createMemoryRelayHandler({ authToken: 'cluster-secret' });
   const signer = await createSigner();
 
-  const res = await handler(await signedReviewRequest({
-    signer,
-    sender: 'alice',
-    room: 'repo',
-    prId: 'pr-at2',
-    verdict: 'approve',
-    authToken: 'cluster-secret',
-  }));
+  const res = await handler(
+    await signedReviewRequest({
+      signer,
+      sender: 'alice',
+      room: 'repo',
+      prId: 'pr-at2',
+      verdict: 'approve',
+      authToken: 'cluster-secret',
+    }),
+  );
   assertEquals(res.status, 200);
 });
 
@@ -634,13 +679,15 @@ Deno.test('review: snapshot includes review data', async () => {
   const service = createMemoryRelayService({});
   const signer = await createSigner();
 
-  await service.fetch(await signedReviewRequest({
-    signer,
-    sender: 'alice',
-    room: 'myrepo',
-    prId: 'pr-snap',
-    verdict: 'approve',
-  }));
+  await service.fetch(
+    await signedReviewRequest({
+      signer,
+      sender: 'alice',
+      room: 'myrepo',
+      prId: 'pr-snap',
+      verdict: 'approve',
+    }),
+  );
 
   const snap = service.snapshot();
   const roomSnap = snap.rooms['myrepo'];
@@ -658,13 +705,15 @@ Deno.test('review: restore recovers review data', async () => {
   const service1 = createMemoryRelayService({});
   const signer = await createSigner();
 
-  await service1.fetch(await signedReviewRequest({
-    signer,
-    sender: 'alice',
-    room: 'myrepo',
-    prId: 'pr-restore',
-    verdict: 'approve',
-  }));
+  await service1.fetch(
+    await signedReviewRequest({
+      signer,
+      sender: 'alice',
+      room: 'myrepo',
+      prId: 'pr-restore',
+      verdict: 'approve',
+    }),
+  );
 
   const snap = service1.snapshot();
   service1.close();
@@ -715,10 +764,12 @@ Deno.test('review: restore skips invalid verdict', () => {
 
 Deno.test('review: PUT returns 405', async () => {
   const handler = createMemoryRelayHandler({});
-  const res = await handler(new Request(
-    'http://relay.local/api/v1/review?room=repo&pr_id=pr-1',
-    { method: 'PUT' },
-  ));
+  const res = await handler(
+    new Request(
+      'http://relay.local/api/v1/review?room=repo&pr_id=pr-1',
+      { method: 'PUT' },
+    ),
+  );
   assertEquals(res.status, 405);
 });
 
@@ -728,20 +779,24 @@ Deno.test('review: multiple PRs tracked independently', async () => {
   const handler = createMemoryRelayHandler({});
   const signer = await createSigner();
 
-  await handler(await signedReviewRequest({
-    signer,
-    sender: 'alice',
-    room: 'repo',
-    prId: 'pr-a',
-    verdict: 'approve',
-  }));
-  await handler(await signedReviewRequest({
-    signer,
-    sender: 'alice',
-    room: 'repo',
-    prId: 'pr-b',
-    verdict: 'deny',
-  }));
+  await handler(
+    await signedReviewRequest({
+      signer,
+      sender: 'alice',
+      room: 'repo',
+      prId: 'pr-a',
+      verdict: 'approve',
+    }),
+  );
+  await handler(
+    await signedReviewRequest({
+      signer,
+      sender: 'alice',
+      room: 'repo',
+      prId: 'pr-b',
+      verdict: 'deny',
+    }),
+  );
 
   const getA = await handler(reviewGetRequest({ room: 'repo', prId: 'pr-a' }));
   const bodyA = await getA.json();

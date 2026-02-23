@@ -1,8 +1,5 @@
 import { assertEquals, assertMatch, assertObjectMatch } from '@std/assert';
-import {
-  createMemoryRelayHandler,
-  createMemoryRelayService,
-} from '../src/memory_handler.ts';
+import { createMemoryRelayHandler, createMemoryRelayService } from '../src/memory_handler.ts';
 import {
   base64UrlEncode,
   buildPublishSigningMessage,
@@ -1451,8 +1448,7 @@ Deno.test('key rotate resets github verification', async () => {
 // --- Named session tests ---
 
 const SESSION_ID_PATTERN = /^[A-Za-z0-9]{6,16}$/;
-const NAMED_SESSION_PATTERN =
-  /^[A-Za-z0-9][A-Za-z0-9._-]{0,38}\/[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const NAMED_SESSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,38}\/[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 function isValidSessionId(id: string): boolean {
   return SESSION_ID_PATTERN.test(id) || NAMED_SESSION_PATTERN.test(id);
@@ -1537,7 +1533,9 @@ function createServeTestHandler(relayService: ReturnType<typeof createMemoryRela
       }
 
       const session = getOrCreateSession(sessionId);
-      const result = await session.fetch(new Request('http://localhost/register', { method: 'POST' }));
+      const result = await session.fetch(
+        new Request('http://localhost/register', { method: 'POST' }),
+      );
       const body = await result.json() as Record<string, unknown>;
       return Response.json({ ...body, session_id: sessionId });
     }
@@ -1553,9 +1551,12 @@ function createServeTestHandler(relayService: ReturnType<typeof createMemoryRela
         return Response.json({ ok: false, error: 'session not found' }, { status: 404 });
       }
       const timeout = url.searchParams.get('timeout') ?? '30';
-      const token = url.searchParams.get('session_token') ?? request.headers.get('x-session-token') ?? '';
+      const token = url.searchParams.get('session_token') ??
+        request.headers.get('x-session-token') ?? '';
       return session.fetch(
-        new Request(`http://localhost/poll?timeout=${timeout}&session_token=${encodeURIComponent(token)}`),
+        new Request(
+          `http://localhost/poll?timeout=${timeout}&session_token=${encodeURIComponent(token)}`,
+        ),
       );
     }
 
@@ -1569,7 +1570,8 @@ function createServeTestHandler(relayService: ReturnType<typeof createMemoryRela
       if (!session) {
         return Response.json({ ok: false, error: 'session not found' }, { status: 404 });
       }
-      const token = url.searchParams.get('session_token') ?? request.headers.get('x-session-token') ?? '';
+      const token = url.searchParams.get('session_token') ??
+        request.headers.get('x-session-token') ?? '';
       return session.fetch(
         new Request(`http://localhost/respond?session_token=${encodeURIComponent(token)}`, {
           method: 'POST',
@@ -1589,7 +1591,8 @@ function createServeTestHandler(relayService: ReturnType<typeof createMemoryRela
       if (!session) {
         return Response.json({ ok: false, error: 'session not found' }, { status: 404 });
       }
-      const token = url.searchParams.get('session_token') ?? request.headers.get('x-session-token') ?? '';
+      const token = url.searchParams.get('session_token') ??
+        request.headers.get('x-session-token') ?? '';
       return session.fetch(
         new Request(`http://localhost/info?session_token=${encodeURIComponent(token)}`),
       );

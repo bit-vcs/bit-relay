@@ -1,13 +1,13 @@
-import http from "k6/http";
-import { check, sleep } from "k6";
-import { Trend, Counter } from "k6/metrics";
-import { BASE_URL, RUN_ID, authHeaders } from "../config.js";
-import { uuid } from "../helpers.js";
+import http from 'k6/http';
+import { check, sleep } from 'k6';
+import { Counter, Trend } from 'k6/metrics';
+import { authHeaders, BASE_URL, RUN_ID } from '../config.js';
+import { uuid } from '../helpers.js';
 
-const publishLatency = new Trend("publish_latency", true);
-const pollLatency = new Trend("poll_latency", true);
-const publishAccepted = new Counter("publish_accepted");
-const publishRejected = new Counter("publish_rejected");
+const publishLatency = new Trend('publish_latency', true);
+const pollLatency = new Trend('poll_latency', true);
+const publishAccepted = new Counter('publish_accepted');
+const publishRejected = new Counter('publish_rejected');
 
 // All VUs share a single room — this stresses Durable Object serialization
 const SHARED_ROOM = `bench-${RUN_ID}-contention`;
@@ -15,21 +15,21 @@ const SHARED_ROOM = `bench-${RUN_ID}-contention`;
 export const options = {
   scenarios: {
     contention: {
-      executor: "ramping-vus",
+      executor: 'ramping-vus',
       startVUs: 1,
       stages: [
-        { duration: "10s", target: 10 },
-        { duration: "15s", target: 50 },
-        { duration: "15s", target: 100 },
-        { duration: "15s", target: 200 },
-        { duration: "10s", target: 0 },
+        { duration: '10s', target: 10 },
+        { duration: '15s', target: 50 },
+        { duration: '15s', target: 100 },
+        { duration: '15s', target: 200 },
+        { duration: '10s', target: 0 },
       ],
     },
   },
   thresholds: {
-    publish_latency: ["p(95)<2000"],
-    poll_latency: ["p(95)<1000"],
-    http_req_failed: ["rate<0.10"],
+    publish_latency: ['p(95)<2000'],
+    poll_latency: ['p(95)<1000'],
+    http_req_failed: ['rate<0.10'],
   },
 };
 
@@ -43,14 +43,14 @@ export default function () {
   // Publish to shared room
   const publishRes = http.post(
     `${BASE_URL}/api/v1/publish?room=${SHARED_ROOM}&sender=${sender}&id=${msgId}`,
-    JSON.stringify({ kind: "bench.contention", vu: vuId, ts: Date.now() }),
+    JSON.stringify({ kind: 'bench.contention', vu: vuId, ts: Date.now() }),
     { headers },
   );
 
   publishLatency.add(publishRes.timings.duration);
 
   const ok = check(publishRes, {
-    "publish status 200": (r) => r.status === 200,
+    'publish status 200': (r) => r.status === 200,
   });
 
   if (ok) {
@@ -71,7 +71,7 @@ export default function () {
   pollLatency.add(pollRes.timings.duration);
 
   check(pollRes, {
-    "poll status 200": (r) => r.status === 200,
+    'poll status 200': (r) => r.status === 200,
   });
 
   sleep(2);
