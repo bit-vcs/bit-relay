@@ -4,7 +4,7 @@ A step-by-step guide to sharing repositories, managing issues, and collaborating
 
 ## Why bit
 
-The Git protocol was originally designed as a decentralized storage system. In practice, however, GitHub has become the de facto authority. This is convenient for choosing stable branches, but it doesn't match the development cycle that assumes the high-speed productivity of AI agents. We believe developers should be able to create branches more freely, choose their own upstreams, and that many forks with different purposes should naturally emerge.
+The Git protocol was originally designed as a decentralized storage system. In practice, however, GitHub has become the de facto authoritative server. This is convenient for choosing stable branches, but it doesn't match the development cycle that assumes the high-speed productivity of AI agents. We believe developers should be able to create branches more freely, choose their own upstreams, and that many forks with different purposes should naturally emerge.
 
 The author of bit has no political stance on decentralization. It's simply that there is a technical advantage in the development workflow. In the end, P2P-developed code will likely be synced to GitHub for operational convenience, and volatile P2P caches lack the reliability needed for long-term storage.
 
@@ -57,7 +57,7 @@ bit-relay is a lightweight relay server that solves two problems:
 
 Code (blobs/trees/commits) transfers via `serve`/`clone`. Hub metadata (issues/PRs) transfers via `sync push`/`sync fetch`. These are independent operations.
 
-By default, the relay URL points to the public instance deployed from this project. You can also deploy your own — see [Deployment Guide](./scaling.md) for details.
+By default, the relay URL points to the public instance deployed from this project (`bit-relay.mizchi.workers.dev`). You can also deploy your own — see [Hosting bit-relay](./host-bit-relay.md) for details.
 
 ### sender — Your Identity
 
@@ -71,16 +71,20 @@ When you run `bit relay serve`, the relay creates a **session** — a temporary 
 
 - **bit CLI** installed:
   ```bash
+  # Install via shell script (Mac/Linux)
   curl -fsSL https://raw.githubusercontent.com/mizchi/bit-vcs/main/install.sh | bash
+
+  # Or install via MoonBit package manager
+  moon install mizchi/bit/cmd/bit
   ```
-- A running **bit-relay** server URL (e.g., `relay+https://relay.example.com`)
+- A running **bit-relay** server URL (e.g., `relay+https://bit-relay.mizchi.workers.dev`)
 - (Optional) An **Ed25519 signing key** for authenticated publishing
 
 Verify your setup:
 
 ```bash
 bit --version
-curl https://relay.example.com/health
+curl https://bit-relay.mizchi.workers.dev/health
 # => {"status":"ok","service":"bit-relay"}
 ```
 
@@ -92,7 +96,7 @@ Configure the relay URL and sender identity via environment variables:
 
 ```bash
 # Relay URL (used as default for serve/sync commands)
-export BIT_RELAY_URL=relay+https://relay.example.com
+export BIT_RELAY_URL=relay+https://bit-relay.mizchi.workers.dev
 
 # Your sender identity
 export BIT_RELAY_SENDER=alice
@@ -119,7 +123,7 @@ If the relay requires signed messages, you can link your signing key to your Git
 ```bash
 # Register key and verify against GitHub SSH keys
 # (requires BIT_RELAY_SENDER and BIT_RELAY_SIGN_PRIVATE_KEY_FILE)
-bit relay sync push relay+https://relay.example.com
+bit relay sync push relay+https://bit-relay.mizchi.workers.dev
 ```
 
 Once verified, your relay sessions can use named paths (e.g., `alice/my-repo`) instead of random IDs.
@@ -158,7 +162,7 @@ bit issue list
 Push your local hub metadata (issues, PRs, notes) to the relay server:
 
 ```bash
-bit relay sync push relay+https://relay.example.com
+bit relay sync push relay+https://bit-relay.mizchi.workers.dev
 ```
 
 ## 6. Serve Repository via Relay
@@ -166,14 +170,14 @@ bit relay sync push relay+https://relay.example.com
 Make your repository available for remote cloning through the relay:
 
 ```bash
-bit relay serve relay+https://relay.example.com
+bit relay serve relay+https://bit-relay.mizchi.workers.dev
 ```
 
 Output:
 
 ```
 Session registered: abc123
-Clone URL: relay+https://relay.example.com/abc123
+Clone URL: relay+https://bit-relay.mizchi.workers.dev/abc123
 ```
 
 Share the clone URL with collaborators. The session stays active while the command runs.
@@ -191,7 +195,7 @@ Share the clone URL with collaborators. The session stays active while the comma
 Collaborators can clone the served repository:
 
 ```bash
-bit clone relay+https://relay.example.com/abc123
+bit clone relay+https://bit-relay.mizchi.workers.dev/abc123
 cd abc123
 ```
 
@@ -200,7 +204,7 @@ cd abc123
 After cloning, fetch the hub metadata (issues, PRs) from the relay:
 
 ```bash
-bit relay sync fetch relay+https://relay.example.com
+bit relay sync fetch relay+https://bit-relay.mizchi.workers.dev
 ```
 
 Then inspect:
