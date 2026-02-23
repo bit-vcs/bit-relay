@@ -333,11 +333,15 @@ export class RelayRoom {
     this.state = state;
     this.service = createMemoryRelayService(buildOptions(env));
     const restore = async () => {
-      const snapshot = await this.state.storage.get(SNAPSHOT_KEY);
-      if (!snapshot || typeof snapshot !== 'object') {
-        return;
+      try {
+        const snapshot = await this.state.storage.get(SNAPSHOT_KEY);
+        if (!snapshot || typeof snapshot !== 'object') {
+          return;
+        }
+        this.service.restore(snapshot as RelaySnapshot);
+      } catch {
+        console.error('Failed to restore relay snapshot; starting fresh');
       }
-      this.service.restore(snapshot as RelaySnapshot);
     };
     if (typeof this.state.blockConcurrencyWhile === 'function') {
       this.ready = this.state.blockConcurrencyWhile(restore);
@@ -360,7 +364,13 @@ export class RelayRoom {
       (pathname === '/api/v1/presence' && request.method === 'DELETE') ||
       (pathname === '/api/v1/review' && request.method === 'POST')
     ) {
-      await this.state.storage.put(SNAPSHOT_KEY, this.service.snapshot());
+      try {
+        await this.state.storage.put(SNAPSHOT_KEY, this.service.snapshot());
+      } catch {
+        // Snapshot may exceed Durable Object storage limit (128 KiB).
+        // The in-memory state is still valid; persistence is best-effort.
+        console.error('Failed to persist relay snapshot (likely size limit exceeded)');
+      }
     }
     return response;
   }
