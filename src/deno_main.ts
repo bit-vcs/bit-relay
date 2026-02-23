@@ -52,7 +52,7 @@ function parseBoolean(raw: string | undefined, fallback: boolean): boolean {
 
 function optionsFromEnv(): MemoryRelayOptions {
   return {
-    authToken: Deno.env.get('CLUSTER_API_TOKEN') ?? undefined,
+    authToken: Deno.env.get('BIT_RELAY_AUTH_TOKEN') ?? undefined,
     maxMessagesPerRoom: parsePositiveInt(
       Deno.env.get('RELAY_MAX_MESSAGES_PER_ROOM') ?? undefined,
       DEFAULT_MAX_MESSAGES_PER_ROOM,

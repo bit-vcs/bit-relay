@@ -2,6 +2,8 @@
 
 This guide explains how to deploy your own bit-relay instance on Cloudflare Workers.
 
+The public instance (`bit-relay.mizchi.workers.dev`) runs without API authentication so that anyone can participate in the P2P network. If you need a private relay for your team, deploy your own and configure `BIT_RELAY_AUTH_TOKEN`.
+
 ## Prerequisites
 
 - A [Cloudflare account](https://dash.cloudflare.com/sign-up)
@@ -62,7 +64,7 @@ All configuration is done via environment variables (set in the Cloudflare dashb
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `CLUSTER_API_TOKEN` | Bearer token for API authentication | (none, open) |
+| `BIT_RELAY_AUTH_TOKEN` | Bearer token for API authentication. When set, all `/api/v1/*` and `/ws` requests require this token. Leave unset for a public relay. | (none, open) |
 
 ### Signature Verification
 
@@ -103,8 +105,8 @@ All configuration is done via environment variables (set in the Cloudflare dashb
 ## Example: Setting Secrets
 
 ```bash
-# Require authentication
-wrangler secret put CLUSTER_API_TOKEN
+# Require API authentication (for private relays)
+wrangler secret put BIT_RELAY_AUTH_TOKEN
 
 # Disable signature requirement (for testing)
 wrangler secret put RELAY_REQUIRE_SIGNATURE

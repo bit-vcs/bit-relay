@@ -41,7 +41,7 @@ interface DurableObjectStateLike {
 export interface RelayWorkerEnv {
   RELAY_ROOM?: DurableObjectNamespaceLike;
   GIT_SERVE_SESSION?: DurableObjectNamespaceLike;
-  CLUSTER_API_TOKEN?: string;
+  BIT_RELAY_AUTH_TOKEN?: string;
   RELAY_MAX_MESSAGES_PER_ROOM?: string;
   PUBLISH_PAYLOAD_MAX_BYTES?: string;
   RELAY_PUBLISH_LIMIT_PER_WINDOW?: string;
@@ -101,7 +101,7 @@ function parseBoolean(raw: string | undefined, fallback: boolean): boolean {
 
 function buildOptions(env: RelayWorkerEnv): MemoryRelayOptions {
   return {
-    authToken: env.CLUSTER_API_TOKEN,
+    authToken: env.BIT_RELAY_AUTH_TOKEN,
     maxMessagesPerRoom: parsePositiveInt(
       env.RELAY_MAX_MESSAGES_PER_ROOM,
       DEFAULT_MAX_MESSAGES_PER_ROOM,

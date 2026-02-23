@@ -49,10 +49,10 @@ Clone side → (response resolved)
 
 ## Auth
 
-`CLUSTER_API_TOKEN` を設定すると `/api/v1/*` と `/ws` で Bearer 認証を要求します。
+`BIT_RELAY_AUTH_TOKEN` を設定すると `/api/v1/*` と `/ws` で Bearer 認証を要求します。
 
 ```bash
-export CLUSTER_API_TOKEN='secret-token'
+export BIT_RELAY_AUTH_TOKEN='secret-token'
 ```
 
 ## Signing / TOFU
@@ -123,7 +123,7 @@ optional env:
 
 - `HOST` (default: `127.0.0.1`)
 - `PORT` (default: `8788`)
-- `CLUSTER_API_TOKEN`
+- `BIT_RELAY_AUTH_TOKEN`
 - `RELAY_MAX_MESSAGES_PER_ROOM` (default: `1000`)
 - `PUBLISH_PAYLOAD_MAX_BYTES` (default: `65536`)
 - `RELAY_PUBLISH_LIMIT_PER_WINDOW` (default: `30`)
