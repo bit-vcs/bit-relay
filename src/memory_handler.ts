@@ -8,6 +8,12 @@ import {
   verifyEd25519Signature,
 } from './signing.ts';
 import { fetchGitHubEd25519Keys, matchesGitHubKey } from './github_keys.ts';
+import {
+  type CacheExchangeRecord,
+  classifyCacheExchangeCollision,
+  parseIncomingCacheExchangeEntry,
+  selectCacheExchangeEntries,
+} from './cache_exchange.ts';
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
@@ -120,10 +126,30 @@ interface SnapshotKeyRecord {
   github_verified_at: number | null;
 }
 
+type CacheExchangeRejectionReason =
+  | 'invalid_room'
+  | 'invalid_topic'
+  | 'loop_origin'
+  | 'max_hops_reached';
+
+interface SnapshotCacheExchangeRecord {
+  cursor: number;
+  envelope: Envelope;
+  origin: string;
+  hop_count: number;
+  max_hops: number;
+}
+
+interface SnapshotCacheExchangeState {
+  cursor: number;
+  records: SnapshotCacheExchangeRecord[];
+}
+
 export interface RelaySnapshot {
   rooms: Record<string, SnapshotRoom>;
   keys_by_sender: Record<string, SnapshotKeyRecord>;
   nonces_by_sender: Record<string, Record<string, number>>;
+  cache_exchange?: SnapshotCacheExchangeState;
 }
 
 export interface IdentitySnapshot {
@@ -148,6 +174,10 @@ export interface MemoryRelayOptions {
   presenceTtlSec?: number;
   wsPingIntervalMs?: number;
   wsIdleTimeoutMs?: number;
+  relayNodeId?: string;
+  peerRelayUrls?: string[];
+  cacheExchangeMaxHops?: number;
+  cacheExchangeMaxRecords?: number;
   fetchFn?: typeof globalThis.fetch;
 }
 
@@ -175,9 +205,12 @@ const DEFAULT_NONCE_TTL_SEC = 600;
 const DEFAULT_MAX_NONCES_PER_SENDER = 2048;
 const DEFAULT_WS_PING_INTERVAL_MS = 30_000;
 const DEFAULT_WS_IDLE_TIMEOUT_MS = 90_000;
+const DEFAULT_CACHE_EXCHANGE_MAX_HOPS = 3;
+const DEFAULT_CACHE_EXCHANGE_MAX_RECORDS = 10_000;
 const ROOM_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const TOPIC_PATTERN = /^[a-z][a-z0-9._-]{0,63}$/;
 const PR_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const NODE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const VALID_VERDICTS: ReadonlySet<string> = new Set(['approve', 'deny']);
 const WS_OPEN_STATE = 1;
 
@@ -227,6 +260,32 @@ function normalizeAfter(raw: string | null, fallback: number): number {
 
 function normalizeRoom(raw: string | null): string {
   return (raw ?? DEFAULT_ROOM).trim();
+}
+
+function generateRelayNodeId(): string {
+  const prefix = 'relay-';
+  const random = crypto.randomUUID().replaceAll('-', '').slice(0, 12);
+  return `${prefix}${random}`;
+}
+
+function normalizeRelayNodeId(raw: string | undefined): string {
+  const value = (raw ?? '').trim();
+  if (value.length > 0 && NODE_ID_PATTERN.test(value)) {
+    return value;
+  }
+  return generateRelayNodeId();
+}
+
+function normalizePeerRelayUrls(raw: string[] | undefined): string[] {
+  if (!Array.isArray(raw)) return [];
+  const dedupe = new Set<string>();
+  for (const value of raw) {
+    if (typeof value !== 'string') continue;
+    const trimmed = value.trim();
+    if (trimmed.length === 0) continue;
+    dedupe.add(trimmed);
+  }
+  return [...dedupe];
 }
 
 function isValidRoomName(room: string): boolean {
@@ -529,6 +588,31 @@ function pollFromRoom(
   };
 }
 
+function findEnvelopeById(roomState: RoomState, id: string): Envelope | null {
+  for (const item of roomState.messages) {
+    if (item.id === id) return item;
+  }
+  return null;
+}
+
+function toCacheExchangeEntryEnvelope(entry: {
+  room: string;
+  id: string;
+  sender: string;
+  topic: string;
+  payload: JsonValue;
+  signature: string | null;
+}): Envelope {
+  return {
+    room: entry.room,
+    id: entry.id,
+    sender: entry.sender,
+    topic: entry.topic,
+    payload: entry.payload,
+    signature: entry.signature,
+  };
+}
+
 function inboxPendingFromRoom(
   roomState: RoomState,
   room: string,
@@ -800,6 +884,16 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
     wsPingIntervalMs + 1000,
     Math.trunc(options.wsIdleTimeoutMs ?? DEFAULT_WS_IDLE_TIMEOUT_MS),
   );
+  const relayNodeId = normalizeRelayNodeId(options.relayNodeId);
+  const peerRelayUrls = normalizePeerRelayUrls(options.peerRelayUrls);
+  const cacheExchangeMaxHops = Math.max(
+    1,
+    Math.trunc(options.cacheExchangeMaxHops ?? DEFAULT_CACHE_EXCHANGE_MAX_HOPS),
+  );
+  const cacheExchangeMaxRecords = Math.max(
+    1,
+    Math.trunc(options.cacheExchangeMaxRecords ?? DEFAULT_CACHE_EXCHANGE_MAX_RECORDS),
+  );
   const fetchFn = options.fetchFn ?? globalThis.fetch;
 
   const rooms = new Map<string, RoomState>();
@@ -808,7 +902,33 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
   const roomRateCounts = new Map<string, RateCounter>();
   const keyRegistry = new Map<string, KeyRecord>();
   const noncesBySender = new Map<string, Map<string, number>>();
+  const cacheExchangeRecords: CacheExchangeRecord[] = [];
+  let cacheExchangeCursor = 0;
   let lastReapAt = Date.now();
+
+  function appendCacheExchangeRecord(record: CacheExchangeRecord): void {
+    cacheExchangeRecords.push(record);
+    if (cacheExchangeRecords.length > cacheExchangeMaxRecords) {
+      const overflow = cacheExchangeRecords.length - cacheExchangeMaxRecords;
+      cacheExchangeRecords.splice(0, overflow);
+    }
+  }
+
+  function recordCacheExchange(
+    envelope: Envelope,
+    origin: string,
+    hopCount: number,
+    maxHops: number,
+  ): void {
+    cacheExchangeCursor += 1;
+    appendCacheExchangeRecord({
+      cursor: cacheExchangeCursor,
+      envelope,
+      origin,
+      hopCount,
+      maxHops,
+    });
+  }
 
   function reapDeadConnections(): void {
     const now = Date.now();
@@ -972,6 +1092,178 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
       return toErrorResponse('forbidden', 403);
     }
     return null;
+  }
+
+  function handleCacheExchangeDiscovery(request: Request): Response {
+    if (request.method !== 'GET') {
+      return methodNotAllowedResponse();
+    }
+    return Response.json({
+      ok: true,
+      protocol: 'cache.exchange.v1',
+      node_id: relayNodeId,
+      peers: peerRelayUrls,
+      max_hops: cacheExchangeMaxHops,
+    }, { status: 200 });
+  }
+
+  function handleCacheExchangePull(request: Request, url: URL): Response {
+    if (request.method !== 'GET') {
+      return methodNotAllowedResponse();
+    }
+    const after = normalizeAfter(url.searchParams.get('after'), 0);
+    const limit = normalizeLimit(url.searchParams.get('limit'), 100);
+    const peerRaw = (url.searchParams.get('peer') ?? '').trim();
+    const peer = peerRaw.length > 0 ? peerRaw : null;
+    const roomRaw = (url.searchParams.get('room') ?? '').trim();
+    const room = roomRaw.length > 0 ? roomRaw : null;
+    if (room && !isValidRoomName(room)) {
+      return invalidRoomResponse();
+    }
+    if (room) {
+      const roomTokenError = checkRoomToken(request, room);
+      if (roomTokenError) return roomTokenError;
+    }
+
+    const result = selectCacheExchangeEntries(cacheExchangeRecords, {
+      after,
+      limit,
+      peer,
+      room,
+    });
+
+    return Response.json(
+      {
+        ok: true,
+        protocol: 'cache.exchange.v1',
+        node_id: relayNodeId,
+        next_cursor: result.nextCursor,
+        returned_count: result.entries.length,
+        entries: result.entries,
+      },
+      { status: 200 },
+    );
+  }
+
+  async function handleCacheExchangePush(request: Request): Promise<Response> {
+    if (request.method !== 'POST') {
+      return methodNotAllowedResponse();
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(await request.text());
+    } catch {
+      return toErrorResponse('invalid json payload', 400);
+    }
+    if (!isObjectRecord(parsed)) {
+      return toErrorResponse('invalid json payload', 400);
+    }
+    if (!Array.isArray(parsed.entries)) {
+      return toErrorResponse('missing field: entries', 400);
+    }
+
+    let accepted = 0;
+    let duplicates = 0;
+    let conflicts = 0;
+    let rejected = 0;
+    const rejectionCounts: Partial<Record<CacheExchangeRejectionReason, number>> = {};
+
+    const reject = (reason: CacheExchangeRejectionReason): void => {
+      rejected += 1;
+      rejectionCounts[reason] = (rejectionCounts[reason] ?? 0) + 1;
+    };
+
+    for (let i = 0; i < parsed.entries.length; i += 1) {
+      const entryResult = parseIncomingCacheExchangeEntry(parsed.entries[i], cacheExchangeMaxHops);
+      if (!entryResult.ok) {
+        return toErrorResponse(`invalid entry at index ${i}: ${entryResult.error}`, 400);
+      }
+      const incoming = entryResult.entry;
+      if (!isValidRoomName(incoming.room)) {
+        reject('invalid_room');
+        continue;
+      }
+      if (!isValidTopic(incoming.topic)) {
+        reject('invalid_topic');
+        continue;
+      }
+      const roomTokenError = checkRoomToken(request, incoming.room);
+      if (roomTokenError) {
+        return roomTokenError;
+      }
+      if (incoming.origin === relayNodeId) {
+        reject('loop_origin');
+        continue;
+      }
+      if (incoming.hopCount >= incoming.maxHops) {
+        reject('max_hops_reached');
+        continue;
+      }
+
+      const roomState = getOrCreateRoomState(rooms, incoming.room);
+      const existing = findEnvelopeById(roomState, incoming.id);
+      const incomingEnvelope = toCacheExchangeEntryEnvelope({
+        room: incoming.room,
+        id: incoming.id,
+        sender: incoming.sender,
+        topic: incoming.topic,
+        payload: incoming.payload,
+        signature: incoming.signature,
+      });
+
+      if (existing) {
+        const collision = classifyCacheExchangeCollision(existing, incomingEnvelope);
+        if (collision === 'duplicate') duplicates += 1;
+        else conflicts += 1;
+        continue;
+      }
+
+      const result = publishIntoRoom(
+        roomState,
+        incoming.room,
+        incoming.sender,
+        incoming.topic,
+        incoming.id,
+        incoming.signature ?? '',
+        incoming.payload,
+        maxMessagesPerRoom,
+      );
+
+      if (
+        result.changed &&
+        result.status === 200 &&
+        result.envelope &&
+        result.body.accepted === true &&
+        typeof result.body.cursor === 'number'
+      ) {
+        accepted += 1;
+        broadcastPublish(roomState, incoming.room, result.envelope, result.body.cursor as number);
+        recordCacheExchange(result.envelope, incoming.origin, incoming.hopCount, incoming.maxHops);
+        continue;
+      }
+
+      if (result.status === 200) {
+        duplicates += 1;
+      } else {
+        reject('invalid_topic');
+      }
+    }
+
+    return Response.json(
+      {
+        ok: true,
+        protocol: 'cache.exchange.v1',
+        node_id: relayNodeId,
+        accepted,
+        duplicates,
+        conflicts,
+        rejected,
+        rejection_counts: rejectionCounts,
+        next_cursor: cacheExchangeCursor,
+      },
+      { status: 200 },
+    );
   }
 
   function handleWebSocket(request: Request, room: string): Response {
@@ -1247,6 +1539,18 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
       return handleKeyVerifyGitHub(request);
     }
 
+    if (pathname === '/api/v1/cache/exchange/discovery') {
+      return handleCacheExchangeDiscovery(request);
+    }
+
+    if (pathname === '/api/v1/cache/exchange/pull') {
+      return handleCacheExchangePull(request, url);
+    }
+
+    if (pathname === '/api/v1/cache/exchange/push') {
+      return handleCacheExchangePush(request);
+    }
+
     if (pathname === '/ws') {
       const room = normalizeRoom(url.searchParams.get('room'));
       if (!isValidRoomName(room)) {
@@ -1366,6 +1670,7 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
         typeof result.body.cursor === 'number'
       ) {
         broadcastPublish(roomState, room, result.envelope, result.body.cursor as number);
+        recordCacheExchange(result.envelope, relayNodeId, 0, cacheExchangeMaxHops);
       }
       return Response.json(result.body, { status: result.status });
     }
@@ -1725,10 +2030,24 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
       noncesSnapshot[sender] = senderNonces;
     }
 
+    const cacheExchangeSnapshot: SnapshotCacheExchangeState = {
+      cursor: cacheExchangeCursor,
+      records: cacheExchangeRecords.map((record) => ({
+        cursor: record.cursor,
+        envelope: JSON.parse(JSON.stringify(record.envelope)) as Envelope,
+        origin: record.origin,
+        hop_count: record.hopCount,
+        max_hops: record.maxHops,
+      })),
+    };
+
     return {
       rooms: snapshotRooms,
       keys_by_sender: keysBySender,
       nonces_by_sender: noncesSnapshot,
+      ...(cacheExchangeSnapshot.records.length > 0 || cacheExchangeSnapshot.cursor > 0
+        ? { cache_exchange: cacheExchangeSnapshot }
+        : {}),
     };
   }
 
@@ -1816,6 +2135,8 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
     rooms.clear();
     keyRegistry.clear();
     noncesBySender.clear();
+    cacheExchangeRecords.splice(0, cacheExchangeRecords.length);
+    cacheExchangeCursor = 0;
 
     if (!isObjectRecord(snapshotData)) {
       return;
@@ -1958,6 +2279,75 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
         }
       }
     }
+
+    let restoredCacheExchange = false;
+    if (
+      isObjectRecord(snapshotData.cache_exchange) &&
+      Array.isArray(snapshotData.cache_exchange.records)
+    ) {
+      let maxCursor = 0;
+      for (const value of snapshotData.cache_exchange.records) {
+        if (!isObjectRecord(value)) continue;
+        if (!isObjectRecord(value.envelope)) continue;
+        const envelopeRecord = value.envelope;
+        const room = typeof envelopeRecord.room === 'string' ? envelopeRecord.room : '';
+        const id = typeof envelopeRecord.id === 'string' ? envelopeRecord.id : '';
+        const sender = typeof envelopeRecord.sender === 'string' ? envelopeRecord.sender : '';
+        const topic = typeof envelopeRecord.topic === 'string' ? envelopeRecord.topic : '';
+        const payload = isJsonValue(envelopeRecord.payload) ? envelopeRecord.payload : null;
+        const signature = typeof envelopeRecord.signature === 'string'
+          ? envelopeRecord.signature
+          : envelopeRecord.signature === null
+          ? null
+          : null;
+        const cursor = typeof value.cursor === 'number' && Number.isFinite(value.cursor)
+          ? Math.trunc(value.cursor)
+          : 0;
+        const origin = typeof value.origin === 'string' ? value.origin.trim() : '';
+        const hopCount = typeof value.hop_count === 'number' && Number.isFinite(value.hop_count)
+          ? Math.max(0, Math.trunc(value.hop_count))
+          : 0;
+        const maxHops = typeof value.max_hops === 'number' && Number.isFinite(value.max_hops)
+          ? Math.max(1, Math.trunc(value.max_hops))
+          : cacheExchangeMaxHops;
+
+        if (cursor <= 0 || origin.length === 0) continue;
+        if (!isValidRoomName(room)) continue;
+        if (id.length === 0 || sender.length === 0) continue;
+        if (!isValidTopic(topic)) continue;
+
+        appendCacheExchangeRecord({
+          cursor,
+          envelope: {
+            room,
+            id,
+            sender,
+            topic,
+            payload,
+            signature,
+          },
+          origin,
+          hopCount,
+          maxHops,
+        });
+        if (cursor > maxCursor) maxCursor = cursor;
+      }
+
+      const snapshotCursor = typeof snapshotData.cache_exchange.cursor === 'number' &&
+          Number.isFinite(snapshotData.cache_exchange.cursor)
+        ? Math.max(0, Math.trunc(snapshotData.cache_exchange.cursor))
+        : 0;
+      cacheExchangeCursor = Math.max(snapshotCursor, maxCursor);
+      restoredCacheExchange = true;
+    }
+
+    if (!restoredCacheExchange) {
+      for (const roomState of rooms.values()) {
+        for (const message of roomState.messages) {
+          recordCacheExchange(message, relayNodeId, 0, cacheExchangeMaxHops);
+        }
+      }
+    }
   }
 
   function close(): void {
@@ -1984,6 +2374,8 @@ export function createMemoryRelayHandler(
 }
 
 export {
+  DEFAULT_CACHE_EXCHANGE_MAX_HOPS,
+  DEFAULT_CACHE_EXCHANGE_MAX_RECORDS,
   DEFAULT_IP_PUBLISH_LIMIT_PER_WINDOW,
   DEFAULT_MAX_CLOCK_SKEW_SEC,
   DEFAULT_MAX_MESSAGES_PER_ROOM,

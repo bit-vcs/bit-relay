@@ -1,4 +1,6 @@
 import {
+  DEFAULT_CACHE_EXCHANGE_MAX_HOPS,
+  DEFAULT_CACHE_EXCHANGE_MAX_RECORDS,
   DEFAULT_IP_PUBLISH_LIMIT_PER_WINDOW,
   DEFAULT_MAX_MESSAGES_PER_ROOM,
   DEFAULT_MAX_WS_SESSIONS,
@@ -241,6 +243,9 @@ function applyJsonOverride(
 }
 
 export function parseMemoryRelayOptionsFromEnv(getEnv: EnvGetter): MemoryRelayOptions {
+  const peersFromJson = parsePeersJson(getEnv('RELAY_PEERS_JSON'));
+  const peersFromCsv = parseCsvUrls(getEnv('RELAY_PEERS'));
+
   return {
     authToken: getEnv('BIT_RELAY_AUTH_TOKEN') ?? undefined,
     maxMessagesPerRoom: parsePositiveInt(
@@ -275,6 +280,16 @@ export function parseMemoryRelayOptionsFromEnv(getEnv: EnvGetter): MemoryRelayOp
       parsePositiveInt(getEnv('WS_PING_INTERVAL_SEC'), DEFAULT_WS_PING_INTERVAL_MS / 1000) * 1000,
     wsIdleTimeoutMs:
       parsePositiveInt(getEnv('WS_IDLE_TIMEOUT_SEC'), DEFAULT_WS_IDLE_TIMEOUT_MS / 1000) * 1000,
+    relayNodeId: parseOptionalString(getEnv('RELAY_NODE_ID')) ?? undefined,
+    peerRelayUrls: peersFromJson ?? peersFromCsv,
+    cacheExchangeMaxHops: parsePositiveInt(
+      getEnv('RELAY_CACHE_EXCHANGE_MAX_HOPS'),
+      DEFAULT_CACHE_EXCHANGE_MAX_HOPS,
+    ),
+    cacheExchangeMaxRecords: parsePositiveInt(
+      getEnv('RELAY_CACHE_EXCHANGE_MAX_RECORDS'),
+      DEFAULT_CACHE_EXCHANGE_MAX_RECORDS,
+    ),
   };
 }
 

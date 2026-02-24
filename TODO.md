@@ -85,15 +85,15 @@
 
 ### TODO
 
-- [ ] relay 間 peer discovery 設定（静的リスト + 将来拡張）
-- [ ] `cache.exchange` プロトコル（差分カーソル方式）を定義
-- [ ] 衝突解決ルール（同一 id、異なる payload）を定義
-- [ ] ループ防止（origin/ttl/hop_count）を追加
+- [x] relay 間 peer discovery 設定（静的リスト + 将来拡張）
+- [x] `cache.exchange` プロトコル（差分カーソル方式）を定義
+- [x] 衝突解決ルール（同一 id、異なる payload）を定義
+- [x] ループ防止（origin/ttl/hop_count）を追加
 
 ### TDD
 
-- [ ] 探索: 2 ノード / 3 ノード / partition 復旧シナリオを先に定義
-- [ ] Red: 交換プロトコルの整合性テスト
+- [x] 探索: 2 ノード / 3 ノード / partition 復旧シナリオを先に定義
+- [x] Red: 交換プロトコルの整合性テスト
 - [ ] Red: E2E マルチノード負荷テスト
 - [ ] Green: peer 同期ワーカー実装
 - [ ] Refactor: 同期状態管理を独立モジュール化
