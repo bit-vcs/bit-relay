@@ -66,9 +66,10 @@ Deno.test('cache issue pull returns only issue topics from cache store', async (
     assertEquals(issueEntries.entries[0].ref, 'issue');
 
     const objectEntries = await cacheStore.list({ kind: 'object', room: 'repo-a', limit: 10 });
-    assertEquals(objectEntries.entries.length, 1);
-    assertEquals(objectEntries.entries[0].key, 'repo-a/n-1');
-    assertEquals(objectEntries.entries[0].ref, 'notify');
+    assertEquals(
+      objectEntries.entries.some((entry) => entry.key === 'repo-a/n-1' && entry.ref === 'notify'),
+      true,
+    );
   } finally {
     service.close();
   }

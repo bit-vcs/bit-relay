@@ -69,6 +69,24 @@ Deno.test('e2e issue cache fallback: issue can be pulled from cache without orig
       room: 'repo-cache',
       payload: { title: 'persisted issue' },
     });
+
+    const issueSyncRes = await cacheNode.fetch(
+      new Request('http://relay.local/api/v1/cache/issues/sync?room=repo-cache&after=0&limit=10'),
+    );
+    assertEquals(issueSyncRes.status, 200);
+    const syncBody = await issueSyncRes.json();
+    assertEquals(syncBody.room_cursor, 1);
+    assertEquals(syncBody.next_cursor, 1);
+    assertEquals(syncBody.events.length, 1);
+    assertEquals(syncBody.snapshots.length, 1);
+    assertObjectMatch(syncBody.events[0], {
+      cursor: 1,
+      issue_id: 'issue-1',
+    });
+    assertObjectMatch(syncBody.snapshots[0], {
+      issue_id: 'issue-1',
+      last_cursor: 1,
+    });
   } finally {
     cacheNode.close();
   }

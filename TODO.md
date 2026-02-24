@@ -136,22 +136,22 @@
 ### TODO
 
 - [x] `topic=issue` の永続保存と検索 API を追加
-- [ ] issue スナップショット + 増分イベントを保持
-- [ ] room 単位の issue cursor を永続化
+- [x] issue スナップショット + 増分イベントを保持
+- [x] room 単位の issue cursor を永続化
 - [x] ノード不在時の issue pull エンドポイントを追加
 
 ### TDD
 
-- [ ] 探索: 既存 `poll` と重複しない API 契約を決める
+- [x] 探索: 既存 `poll` と重複しない API 契約を決める
 - [ ] Red: issue 作成/更新/close/再オープンの整合性テスト
-- [ ] Red: offline node 想定 E2E（origin 停止中でも取得可）
-- [ ] Green: issue cache 実装
+- [x] Red: offline node 想定 E2E（origin 停止中でも取得可）
+- [x] Green: issue cache 実装
 - [ ] Refactor: issue projection 層を分離
 
 ### 完了条件
 
-- [ ] active node なしでも relay から issue 取得可能
-- [ ] cursor 再開時に重複なく追従できる
+- [x] active node なしでも relay から issue 取得可能
+- [x] cursor 再開時に重複なく追従できる
 
 ---
 
