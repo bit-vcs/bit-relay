@@ -42,7 +42,10 @@ function generateSessionId(): string {
 const host = Deno.env.get('HOST') ?? '127.0.0.1';
 const port = parsePositiveInt(Deno.env.get('PORT') ?? undefined, 8788);
 const runtimeConfig = parseRelayRuntimeConfigFromEnv((key) => Deno.env.get(key) ?? undefined);
-const relayCacheStore = createMemoryCacheStore();
+const relayCacheStore = createMemoryCacheStore({
+  ttlSec: runtimeConfig.cache.ttlSec,
+  maxBytes: runtimeConfig.cache.maxBytes,
+});
 const service = createMemoryRelayService({
   ...runtimeConfig.relay,
   peerRelayUrls: runtimeConfig.peers.urls.length > 0

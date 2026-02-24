@@ -151,6 +151,29 @@ function createFailingListCacheStore(): CacheStore {
   };
 }
 
+function createFlakyPutCacheStore(failuresBeforeSuccess: number): CacheStore {
+  const store = createMemoryCacheStore();
+  let remaining = Math.max(0, Math.trunc(failuresBeforeSuccess));
+  return {
+    async put(request): Promise<void> {
+      if (remaining > 0) {
+        remaining -= 1;
+        throw new Error('transient put failure');
+      }
+      await store.put(request);
+    },
+    async get(kind, key) {
+      return await store.get(kind, key);
+    },
+    async delete(kind, key): Promise<boolean> {
+      return await store.delete(kind, key);
+    },
+    async list(query) {
+      return await store.list(query);
+    },
+  };
+}
+
 Deno.test('cache issue pull degrades when cache backend list fails', async () => {
   const service = createMemoryRelayService({
     requireSignatures: false,
@@ -168,6 +191,43 @@ Deno.test('cache issue pull degrades when cache backend list fails', async () =>
     assertEquals(body.next_cursor, 10);
     assertEquals(Array.isArray(body.envelopes), true);
     assertEquals(body.envelopes.length, 0);
+  } finally {
+    service.close();
+  }
+});
+
+Deno.test('cache issue pull retries transient cache put failures', async () => {
+  const service = createMemoryRelayService({
+    requireSignatures: false,
+    cacheStore: createFlakyPutCacheStore(1),
+    cachePersistMaxRetries: 2,
+    cachePersistRetryBaseDelayMs: 0,
+    cachePersistRetryMaxDelayMs: 0,
+  } as any);
+
+  try {
+    const publishRes = await service.fetch(
+      publishRequest({
+        room: 'repo-a',
+        sender: 'alice',
+        id: 'i-retry-1',
+        topic: 'issue',
+        payload: { title: 'retry issue' },
+      }),
+    );
+    assertEquals(publishRes.status, 200);
+
+    const res = await service.fetch(
+      new Request('http://relay.local/api/v1/cache/issues/pull?room=repo-a&after=0&limit=10'),
+    );
+    assertEquals(res.status, 200);
+    const body = await res.json();
+    assertEquals(body.envelopes.length, 1);
+    assertObjectMatch(body.envelopes[0], {
+      id: 'i-retry-1',
+      topic: 'issue',
+      payload: { title: 'retry issue' },
+    });
   } finally {
     service.close();
   }

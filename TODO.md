@@ -112,17 +112,17 @@
 - [x] CacheStore 抽象（memory / R2 / 将来 S3）を追加
 - [x] 通信通過データの write-through 保存（objects, pack, refs, issues）
 - [x] キャッシュ索引（content hash, ref, room, updated_at）を定義
-- [ ] R2 から clone/fetch 可能な read path を追加
-- [ ] GC/TTL と容量上限ポリシーを追加
+- [x] R2 から clone/fetch 可能な read path を追加
+- [x] GC/TTL と容量上限ポリシーを追加
 - [x] git serve の clone/fetch read fallback を cache store 経由で追加（memory）
 
 ### TDD
 
-- [ ] 探索: 大容量 pack の分割戦略・整合性検証方法を決める
+- [x] 探索: 大容量 pack の分割戦略・整合性検証方法を決める
 - [x] Red: CacheStore contract test（同一テストを memory/R2 両方で実行）
 - [x] Red: node down 時の cache hit E2E
 - [x] Green: write-through + read fallback 実装
-- [ ] Refactor: 永続化キュー/再試行を分離
+- [x] Refactor: 永続化キュー/再試行を分離
 
 ### 完了条件
 

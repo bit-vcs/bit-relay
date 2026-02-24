@@ -12,6 +12,7 @@ Deno.test('parseRelayRuntimeConfigFromEnv returns defaults', () => {
   assertEquals(config.github.enabled, false);
   assertEquals(config.github.apiBaseUrl, 'https://api.github.com');
   assertEquals(config.cache.provider, 'memory');
+  assertEquals(config.cache.maxBytes, null);
   assertEquals(config.peers.urls, []);
   assertEquals(config.trigger.webhookUrl, null);
   assertEquals(config.trigger.eventType, 'relay.incoming_ref');
@@ -49,6 +50,7 @@ Deno.test('parseRelayRuntimeConfigFromEnv applies RELAY_CONFIG_JSON override', (
           r2_bucket: 'bit-relay-cache',
           r2_prefix: 'relay/',
           ttl_sec: 172800,
+          max_bytes: 10_485_760,
         },
         peers: {
           urls: ['https://relay-c.example'],
@@ -76,6 +78,7 @@ Deno.test('parseRelayRuntimeConfigFromEnv applies RELAY_CONFIG_JSON override', (
   assertEquals(config.cache.r2Bucket, 'bit-relay-cache');
   assertEquals(config.cache.r2Prefix, 'relay/');
   assertEquals(config.cache.ttlSec, 172800);
+  assertEquals(config.cache.maxBytes, 10_485_760);
   assertEquals(config.peers.urls, ['https://relay-c.example']);
   assertEquals(config.peers.syncIntervalSec, 12);
   assertEquals(config.trigger.webhookUrl, 'https://ci.example/hook');
@@ -95,4 +98,14 @@ Deno.test('parseRelayRuntimeConfigFromEnv parses trigger rule env values', () =>
 
   assertEquals(config.trigger.eventType, 'relay.ref_received');
   assertEquals(config.trigger.refPrefixes, ['refs/custom/incoming/', 'refs/relay/incoming/']);
+});
+
+Deno.test('parseRelayRuntimeConfigFromEnv parses cache max bytes from env', () => {
+  const config = parseRelayRuntimeConfigFromEnv(
+    envFrom({
+      RELAY_CACHE_MAX_BYTES: '2048',
+    }),
+  );
+
+  assertEquals(config.cache.maxBytes, 2048);
 });

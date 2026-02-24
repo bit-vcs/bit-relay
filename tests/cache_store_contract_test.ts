@@ -113,6 +113,7 @@ function textOf(object: CacheStoreObject | null): string | null {
 }
 
 type StoreFactory = () => CacheStore;
+type PolicyStoreFactory = (options: { ttlSec?: number; maxBytes?: number }) => CacheStore;
 
 function runCacheStoreContract(name: string, createStore: StoreFactory): void {
   Deno.test(`${name}: put/get/delete`, async () => {
@@ -189,8 +190,71 @@ function runCacheStoreContract(name: string, createStore: StoreFactory): void {
   });
 }
 
+function runCacheStorePolicyContract(
+  name: string,
+  createStore: PolicyStoreFactory,
+): void {
+  Deno.test(`${name}: ttl policy expires stale record`, async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const store = createStore({ ttlSec: 30 });
+    await store.put({
+      kind: 'object',
+      key: 'fresh',
+      body: new TextEncoder().encode('fresh'),
+      updatedAt: nowSec,
+    });
+    await store.put({
+      kind: 'object',
+      key: 'stale',
+      body: new TextEncoder().encode('stale'),
+      updatedAt: nowSec - 60,
+    });
+
+    assertEquals(await store.get('object', 'stale'), null);
+    const listed = await store.list({ kind: 'object' });
+    assertEquals(listed.entries.map((entry) => entry.key), ['fresh']);
+  });
+
+  Deno.test(`${name}: maxBytes evicts oldest records`, async () => {
+    const store = createStore({ maxBytes: 5 });
+    await store.put({
+      kind: 'object',
+      key: 'a',
+      body: new TextEncoder().encode('aaa'),
+      updatedAt: 1,
+    });
+    await store.put({
+      kind: 'object',
+      key: 'b',
+      body: new TextEncoder().encode('bbb'),
+      updatedAt: 2,
+    });
+
+    assertEquals(await store.get('object', 'a'), null);
+    assertEquals(new TextDecoder().decode((await store.get('object', 'b'))!.body), 'bbb');
+
+    await store.put({
+      kind: 'object',
+      key: 'c',
+      body: new TextEncoder().encode('cccc'),
+      updatedAt: 3,
+    });
+
+    assertEquals(await store.get('object', 'b'), null);
+    assertEquals(new TextDecoder().decode((await store.get('object', 'c'))!.body), 'cccc');
+    const listed = await store.list({ kind: 'object' });
+    assertEquals(listed.entries.map((entry) => entry.key), ['c']);
+  });
+}
+
 runCacheStoreContract('memory cache store', () => createMemoryCacheStore());
 runCacheStoreContract('r2 cache store', () => {
   const bucket = new FakeR2Bucket();
   return createR2CacheStore({ bucket, prefix: 'relay-cache/' });
+});
+
+runCacheStorePolicyContract('memory cache store', (options) => createMemoryCacheStore(options));
+runCacheStorePolicyContract('r2 cache store', (options) => {
+  const bucket = new FakeR2Bucket();
+  return createR2CacheStore({ bucket, prefix: 'relay-cache/', policy: options });
 });

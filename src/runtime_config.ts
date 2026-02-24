@@ -28,6 +28,7 @@ export interface RelayCacheConfig {
   r2Bucket: string | null;
   r2Prefix: string;
   ttlSec: number;
+  maxBytes: number | null;
 }
 
 export interface RelayPeerConfig {
@@ -249,6 +250,8 @@ function applyJsonOverride(
     if (r2Prefix !== null) config.cache.r2Prefix = r2Prefix;
     const ttlSec = asPositiveInt(readRaw(cache, 'ttl_sec', 'ttlSec'));
     if (ttlSec !== null) config.cache.ttlSec = ttlSec;
+    const maxBytes = asPositiveInt(readRaw(cache, 'max_bytes', 'maxBytes'));
+    if (maxBytes !== null) config.cache.maxBytes = maxBytes;
   }
 
   const peers = asObject(rawJson.peers);
@@ -341,7 +344,9 @@ export function parseRelayRuntimeConfigFromEnv(getEnv: EnvGetter): RelayRuntimeC
   const peersFromJson = parsePeersJson(getEnv('RELAY_PEERS_JSON'));
   const peersFromCsv = parseCsvUrls(getEnv('RELAY_PEERS'));
   const triggerRefPrefixesFromCsv = parseCsvList(getEnv('RELAY_TRIGGER_REF_PREFIXES'));
-  const triggerEventType = normalizeTriggerEventType(parseOptionalString(getEnv('RELAY_TRIGGER_EVENT_TYPE')));
+  const triggerEventType = normalizeTriggerEventType(
+    parseOptionalString(getEnv('RELAY_TRIGGER_EVENT_TYPE')),
+  );
 
   const base: RelayRuntimeConfig = {
     relay: parseMemoryRelayOptionsFromEnv(getEnv),
@@ -361,6 +366,7 @@ export function parseRelayRuntimeConfigFromEnv(getEnv: EnvGetter): RelayRuntimeC
       r2Bucket: parseOptionalString(getEnv('RELAY_CACHE_R2_BUCKET')),
       r2Prefix: parseOptionalString(getEnv('RELAY_CACHE_R2_PREFIX')) ?? 'relay-cache/',
       ttlSec: parsePositiveInt(getEnv('RELAY_CACHE_TTL_SEC'), 86_400),
+      maxBytes: parseOptionalPositiveInt(getEnv('RELAY_CACHE_MAX_BYTES')),
     },
     peers: {
       urls: peersFromJson ?? peersFromCsv,

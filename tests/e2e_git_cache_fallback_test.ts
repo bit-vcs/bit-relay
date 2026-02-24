@@ -1,7 +1,12 @@
 import { assert, assertEquals, assertObjectMatch } from '@std/assert';
 import { createMemoryRelayService } from '../src/memory_handler.ts';
 import { createGitServeSession } from '../src/git_serve_session.ts';
-import { type CacheStore, createMemoryCacheStore } from '../src/cache_store.ts';
+import {
+  type CacheStore,
+  createMemoryCacheStore,
+  createR2CacheStore,
+  type R2BucketLike,
+} from '../src/cache_store.ts';
 import {
   buildGitCacheKeyFromRequest,
   CACHE_HIT_HEADER,
@@ -14,6 +19,106 @@ interface RelayHarness {
   cleanupSession(sessionId: string): void;
   dropSession(sessionId: string): void;
   shutdown(): Promise<void>;
+}
+
+interface StoredObject {
+  body: Uint8Array;
+  httpMetadata?: { contentType?: string };
+  customMetadata?: Record<string, string>;
+  uploaded: Date;
+}
+
+class FakeR2ObjectBody {
+  readonly body: Uint8Array;
+  readonly size: number;
+  readonly uploaded: Date;
+  readonly httpMetadata?: { contentType?: string };
+  readonly customMetadata?: Record<string, string>;
+
+  constructor(source: StoredObject) {
+    this.body = source.body;
+    this.size = source.body.byteLength;
+    this.uploaded = source.uploaded;
+    this.httpMetadata = source.httpMetadata;
+    this.customMetadata = source.customMetadata;
+  }
+
+  async arrayBuffer(): Promise<ArrayBuffer> {
+    return new Uint8Array(this.body).buffer as ArrayBuffer;
+  }
+}
+
+class FakeR2Bucket implements R2BucketLike {
+  private readonly objects = new Map<string, StoredObject>();
+
+  async put(
+    key: string,
+    value: string | ArrayBuffer | Uint8Array,
+    options?: {
+      httpMetadata?: { contentType?: string };
+      customMetadata?: Record<string, string>;
+    },
+  ): Promise<void> {
+    const body = typeof value === 'string'
+      ? new TextEncoder().encode(value)
+      : value instanceof Uint8Array
+      ? value
+      : new Uint8Array(value);
+    this.objects.set(key, {
+      body,
+      httpMetadata: options?.httpMetadata,
+      customMetadata: options?.customMetadata,
+      uploaded: new Date(),
+    });
+  }
+
+  async get(key: string): Promise<FakeR2ObjectBody | null> {
+    const found = this.objects.get(key);
+    return found ? new FakeR2ObjectBody(found) : null;
+  }
+
+  async delete(key: string): Promise<void> {
+    this.objects.delete(key);
+  }
+
+  async list(options?: {
+    prefix?: string;
+    limit?: number;
+    cursor?: string;
+  }): Promise<{
+    objects: Array<{
+      key: string;
+      size: number;
+      uploaded: Date;
+      httpMetadata?: { contentType?: string };
+      customMetadata?: Record<string, string>;
+    }>;
+    truncated: boolean;
+    cursor?: string;
+  }> {
+    const prefix = options?.prefix ?? '';
+    const limit = Math.max(1, Math.trunc(options?.limit ?? 1000));
+    const start = Math.max(0, Number.parseInt(options?.cursor ?? '0', 10) || 0);
+    const filtered = [...this.objects.entries()]
+      .filter(([key]) => key.startsWith(prefix))
+      .sort(([a], [b]) => a.localeCompare(b));
+
+    const page = filtered.slice(start, start + limit).map(([key, object]) => ({
+      key,
+      size: object.body.byteLength,
+      uploaded: object.uploaded,
+      httpMetadata: object.httpMetadata,
+      customMetadata: object.customMetadata,
+    }));
+
+    const next = start + page.length;
+    const truncated = next < filtered.length;
+    return {
+      objects: page,
+      truncated,
+      ...(truncated ? { cursor: String(next) } : {}),
+    };
+  }
 }
 
 function createRelayHarness(options: { cacheStore?: CacheStore } = {}): RelayHarness {
@@ -279,6 +384,65 @@ Deno.test('e2e git cache fallback: serves cached info/refs when session inactive
     await relay.shutdown();
   }
 });
+
+Deno.test(
+  'e2e git cache fallback: serves cached info/refs when session inactive with r2 cache store',
+  async () => {
+    const relay = createRelayHarness({
+      cacheStore: createR2CacheStore({
+        bucket: new FakeR2Bucket(),
+        prefix: 'relay-cache/',
+      }),
+    });
+    try {
+      const node = await registerNode(relay.baseUrl);
+
+      const firstPromise = fetch(
+        `${relay.baseUrl}/git/${node.sessionId}/info/refs?service=git-upload-pack&session_token=${node.sessionToken}`,
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      const pollRes = await fetch(
+        `${relay.baseUrl}/api/v1/serve/poll?session=${node.sessionId}&timeout=2&session_token=${node.sessionToken}`,
+      );
+      const pollBody = await pollRes.json() as { requests: Array<{ request_id: string }> };
+      assert(pollBody.requests.length > 0);
+
+      const respondRes = await fetch(
+        `${relay.baseUrl}/api/v1/serve/respond?session=${node.sessionId}&session_token=${node.sessionToken}`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            request_id: pollBody.requests[0].request_id,
+            status: 200,
+            headers: { 'content-type': 'application/x-git-upload-pack-advertisement' },
+            body_base64: btoa('refs-r2'),
+          }),
+        },
+      );
+      assertEquals(respondRes.status, 200);
+      await respondRes.json();
+
+      const first = await firstPromise;
+      assertEquals(first.status, 200);
+      assertEquals(await first.text(), 'refs-r2');
+      assertEquals(first.headers.get(CACHE_HIT_HEADER), null);
+
+      relay.cleanupSession(node.sessionId);
+      relay.dropSession(node.sessionId);
+
+      const second = await fetch(
+        `${relay.baseUrl}/git/${node.sessionId}/info/refs?service=git-upload-pack&session_token=${node.sessionToken}`,
+      );
+      assertEquals(second.status, 200);
+      assertEquals(await second.text(), 'refs-r2');
+      assertEquals(second.headers.get(CACHE_HIT_HEADER), '1');
+    } finally {
+      await relay.shutdown();
+    }
+  },
+);
 
 Deno.test('e2e git cache fallback: POST cache key is request-body sensitive', async () => {
   const relay = createRelayHarness();

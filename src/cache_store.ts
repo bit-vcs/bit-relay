@@ -56,6 +56,13 @@ export interface CacheStore {
   list(query?: CacheStoreListQuery): Promise<CacheStoreListResult>;
 }
 
+export interface CacheStorePolicyOptions {
+  ttlSec?: number | null;
+  maxBytes?: number | null;
+}
+
+export type MemoryCacheStoreOptions = CacheStorePolicyOptions;
+
 export interface R2ObjectBodyLike {
   size?: number;
   uploaded?: Date;
@@ -97,11 +104,23 @@ export interface R2BucketLike {
 export interface R2CacheStoreOptions {
   bucket: R2BucketLike;
   prefix?: string;
+  policy?: CacheStorePolicyOptions;
 }
 
 interface StoredRecord {
   body: Uint8Array;
   metadata: CacheStoreMetadata;
+}
+
+interface NormalizedCacheStorePolicy {
+  ttlSec: number | null;
+  maxBytes: number | null;
+}
+
+interface EvictionCandidate {
+  storageKey: string;
+  updatedAt: number;
+  size: number;
 }
 
 function normalizeLimit(raw: number | undefined): number {
@@ -140,6 +159,36 @@ function normalizeKey(key: string): string {
 
 function nowEpochSec(): number {
   return Math.floor(Date.now() / 1000);
+}
+
+function normalizeOptionalPositive(raw: number | null | undefined): number | null {
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw <= 0) return null;
+  return Math.trunc(raw);
+}
+
+function normalizeCacheStorePolicy(
+  options: CacheStorePolicyOptions | undefined,
+): NormalizedCacheStorePolicy {
+  return {
+    ttlSec: normalizeOptionalPositive(options?.ttlSec),
+    maxBytes: normalizeOptionalPositive(options?.maxBytes),
+  };
+}
+
+function isExpiredByPolicy(
+  metadata: CacheStoreMetadata,
+  policy: NormalizedCacheStorePolicy,
+  nowSec = nowEpochSec(),
+): boolean {
+  if (policy.ttlSec === null) return false;
+  return nowSec - metadata.updatedAt >= policy.ttlSec;
+}
+
+function sortEvictionCandidates(candidates: EvictionCandidate[]): EvictionCandidate[] {
+  return [...candidates].sort((a, b) => {
+    if (a.updatedAt === b.updatedAt) return a.storageKey.localeCompare(b.storageKey);
+    return a.updatedAt - b.updatedAt;
+  });
 }
 
 function toStorageKey(kind: CacheStoreKind, key: string): string {
@@ -182,8 +231,39 @@ function paginateMetadata(
   };
 }
 
-export function createMemoryCacheStore(): CacheStore {
+export function createMemoryCacheStore(options: MemoryCacheStoreOptions = {}): CacheStore {
+  const policy = normalizeCacheStorePolicy(options);
   const records = new Map<string, StoredRecord>();
+
+  function pruneExpiredRecords(nowSec = nowEpochSec()): void {
+    if (policy.ttlSec === null) return;
+    for (const [storageKey, record] of records.entries()) {
+      if (!isExpiredByPolicy(record.metadata, policy, nowSec)) continue;
+      records.delete(storageKey);
+    }
+  }
+
+  function enforceMaxBytesLimit(): void {
+    if (policy.maxBytes === null) return;
+
+    const candidates: EvictionCandidate[] = [];
+    let totalBytes = 0;
+    for (const [storageKey, record] of records.entries()) {
+      totalBytes += record.metadata.size;
+      candidates.push({
+        storageKey,
+        updatedAt: record.metadata.updatedAt,
+        size: record.metadata.size,
+      });
+    }
+    if (totalBytes <= policy.maxBytes) return;
+
+    for (const candidate of sortEvictionCandidates(candidates)) {
+      if (totalBytes <= policy.maxBytes) break;
+      if (!records.delete(candidate.storageKey)) continue;
+      totalBytes -= candidate.size;
+    }
+  }
 
   async function put(request: CacheStorePutRequest): Promise<void> {
     const kind = normalizeKind(request.kind);
@@ -201,14 +281,21 @@ export function createMemoryCacheStore(): CacheStore {
       ...(request.contentHash ? { contentHash: request.contentHash } : {}),
       ...(request.contentType ? { contentType: request.contentType } : {}),
     };
+    pruneExpiredRecords();
     records.set(toStorageKey(kind, key), { body, metadata });
+    enforceMaxBytesLimit();
   }
 
   async function get(kind: CacheStoreKind, key: string): Promise<CacheStoreObject | null> {
     const normalizedKind = normalizeKind(kind);
     const normalizedKey = normalizeKey(key);
-    const found = records.get(toStorageKey(normalizedKind, normalizedKey));
+    const storageKey = toStorageKey(normalizedKind, normalizedKey);
+    const found = records.get(storageKey);
     if (!found) return null;
+    if (isExpiredByPolicy(found.metadata, policy)) {
+      records.delete(storageKey);
+      return null;
+    }
     return {
       body: cloneBytes(found.body),
       metadata: { ...found.metadata },
@@ -222,6 +309,7 @@ export function createMemoryCacheStore(): CacheStore {
   }
 
   async function list(query: CacheStoreListQuery = {}): Promise<CacheStoreListResult> {
+    pruneExpiredRecords();
     const entries: CacheStoreMetadata[] = [];
     for (const record of records.values()) {
       if (!metadataMatchesQuery(record.metadata, query)) continue;
@@ -309,6 +397,78 @@ function toMetadataFromR2Object(
 export function createR2CacheStore(options: R2CacheStoreOptions): CacheStore {
   const bucket = options.bucket;
   const prefix = normalizeR2Prefix(options.prefix);
+  const policy = normalizeCacheStorePolicy(options.policy);
+
+  interface R2PolicyEntry {
+    r2Key: string;
+    metadata: CacheStoreMetadata;
+  }
+
+  async function listPolicyEntries(): Promise<R2PolicyEntry[]> {
+    const entries: R2PolicyEntry[] = [];
+    let cursor: string | undefined;
+    while (true) {
+      const page = await bucket.list({ prefix, limit: 1000, cursor });
+      for (const object of page.objects) {
+        const parsed = parseR2Key(prefix, object.key);
+        if (!parsed) continue;
+        entries.push({
+          r2Key: object.key,
+          metadata: toMetadataFromR2Object(
+            parsed.kind,
+            parsed.key,
+            object.size,
+            object.uploaded,
+            object.httpMetadata?.contentType,
+            object.customMetadata,
+          ),
+        });
+      }
+      if (!page.truncated || !page.cursor) break;
+      cursor = page.cursor;
+    }
+    return entries;
+  }
+
+  async function pruneExpiredPolicyEntries(entries: R2PolicyEntry[]): Promise<R2PolicyEntry[]> {
+    if (policy.ttlSec === null) return entries;
+    const nowSec = nowEpochSec();
+    const kept: R2PolicyEntry[] = [];
+    for (const entry of entries) {
+      if (isExpiredByPolicy(entry.metadata, policy, nowSec)) {
+        await bucket.delete(entry.r2Key);
+        continue;
+      }
+      kept.push(entry);
+    }
+    return kept;
+  }
+
+  async function enforceMaxBytesPolicy(entries: R2PolicyEntry[]): Promise<void> {
+    if (policy.maxBytes === null) return;
+    let totalBytes = entries.reduce((sum, entry) => sum + entry.metadata.size, 0);
+    if (totalBytes <= policy.maxBytes) return;
+
+    const candidates = sortEvictionCandidates(
+      entries.map((entry) => ({
+        storageKey: entry.r2Key,
+        updatedAt: entry.metadata.updatedAt,
+        size: entry.metadata.size,
+      })),
+    );
+    for (const candidate of candidates) {
+      if (totalBytes <= policy.maxBytes) break;
+      await bucket.delete(candidate.storageKey);
+      totalBytes -= candidate.size;
+    }
+  }
+
+  async function applyPolicyAfterWrite(): Promise<void> {
+    if (policy.ttlSec === null && policy.maxBytes === null) return;
+    let entries = await listPolicyEntries();
+    entries = await pruneExpiredPolicyEntries(entries);
+    await enforceMaxBytesPolicy(entries);
+  }
 
   async function put(request: CacheStorePutRequest): Promise<void> {
     const kind = normalizeKind(request.kind);
@@ -318,27 +478,29 @@ export function createR2CacheStore(options: R2CacheStoreOptions): CacheStore {
       httpMetadata: request.contentType ? { contentType: request.contentType } : undefined,
       customMetadata: toR2Metadata({ ...request, kind, key }),
     });
+    await applyPolicyAfterWrite();
   }
 
   async function get(kind: CacheStoreKind, key: string): Promise<CacheStoreObject | null> {
     const normalizedKind = normalizeKind(kind);
     const normalizedKey = normalizeKey(key);
-    const found = await bucket.get(toR2Key(prefix, normalizedKind, normalizedKey));
+    const r2Key = toR2Key(prefix, normalizedKind, normalizedKey);
+    const found = await bucket.get(r2Key);
     if (!found) return null;
     const body = new Uint8Array(await found.arrayBuffer());
-    return {
-      body,
-      metadata: toMetadataFromR2Object(
-        normalizedKind,
-        normalizedKey,
-        typeof found.size === 'number' && Number.isFinite(found.size)
-          ? found.size
-          : body.byteLength,
-        found.uploaded,
-        found.httpMetadata?.contentType,
-        found.customMetadata,
-      ),
-    };
+    const metadata = toMetadataFromR2Object(
+      normalizedKind,
+      normalizedKey,
+      typeof found.size === 'number' && Number.isFinite(found.size) ? found.size : body.byteLength,
+      found.uploaded,
+      found.httpMetadata?.contentType,
+      found.customMetadata,
+    );
+    if (isExpiredByPolicy(metadata, policy)) {
+      await bucket.delete(r2Key);
+      return null;
+    }
+    return { body, metadata };
   }
 
   async function remove(kind: CacheStoreKind, key: string): Promise<boolean> {
@@ -351,6 +513,7 @@ export function createR2CacheStore(options: R2CacheStoreOptions): CacheStore {
   async function list(query: CacheStoreListQuery = {}): Promise<CacheStoreListResult> {
     const entries: CacheStoreMetadata[] = [];
     let cursor: string | undefined;
+    const nowSec = nowEpochSec();
     while (true) {
       const page = await bucket.list({ prefix, limit: 1000, cursor });
       for (const object of page.objects) {
@@ -364,6 +527,10 @@ export function createR2CacheStore(options: R2CacheStoreOptions): CacheStore {
           object.httpMetadata?.contentType,
           object.customMetadata,
         );
+        if (isExpiredByPolicy(metadata, policy, nowSec)) {
+          await bucket.delete(object.key);
+          continue;
+        }
         if (!metadataMatchesQuery(metadata, query)) continue;
         entries.push(metadata);
       }

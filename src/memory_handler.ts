@@ -17,12 +17,12 @@ import {
 } from './cache_exchange.ts';
 import { createIssueSyncEngine } from './issue_sync_engine.ts';
 import {
-  type IssueCacheCursorRecord,
   deriveIssueAction,
   extractIssueIdFromEnvelope,
+  isIssueTopic,
+  type IssueCacheCursorRecord,
   type IssueCacheEventRecord,
   type IssueCacheSnapshotRecord,
-  isIssueTopic,
   issueCursorStorageKey,
   issueEventStorageKey,
   issueSnapshotStorageKey,
@@ -33,6 +33,7 @@ import {
   parseIssueEventCursorFromKey,
   parseIssueSourceUpdatedAtMs,
 } from './issue_projection.ts';
+import { createCachePersistenceQueue } from './cache_persistence_queue.ts';
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
@@ -216,6 +217,9 @@ export interface MemoryRelayOptions {
   cacheExchangeMaxHops?: number;
   cacheExchangeMaxRecords?: number;
   cacheStore?: CacheStore;
+  cachePersistMaxRetries?: number;
+  cachePersistRetryBaseDelayMs?: number;
+  cachePersistRetryMaxDelayMs?: number;
   githubWebhookSecret?: string;
   fetchFn?: typeof globalThis.fetch;
 }
@@ -246,6 +250,9 @@ const DEFAULT_WS_PING_INTERVAL_MS = 30_000;
 const DEFAULT_WS_IDLE_TIMEOUT_MS = 90_000;
 const DEFAULT_CACHE_EXCHANGE_MAX_HOPS = 3;
 const DEFAULT_CACHE_EXCHANGE_MAX_RECORDS = 10_000;
+const DEFAULT_CACHE_PERSIST_MAX_RETRIES = 2;
+const DEFAULT_CACHE_PERSIST_RETRY_BASE_DELAY_MS = 20;
+const DEFAULT_CACHE_PERSIST_RETRY_MAX_DELAY_MS = 500;
 const MAX_GITHUB_WEBHOOK_DELIVERY_IDS = 10_000;
 const MAX_GITHUB_WEBHOOK_DLQ_ENTRIES = 10_000;
 const GITHUB_WEBHOOK_RETRY_BASE_SEC = 30;
@@ -1115,8 +1122,27 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
     Math.trunc(options.cacheExchangeMaxRecords ?? DEFAULT_CACHE_EXCHANGE_MAX_RECORDS),
   );
   const cacheStore = options.cacheStore ?? null;
+  const cachePersistMaxRetries = Math.max(
+    0,
+    Math.trunc(options.cachePersistMaxRetries ?? DEFAULT_CACHE_PERSIST_MAX_RETRIES),
+  );
+  const cachePersistRetryBaseDelayMs = Math.max(
+    0,
+    Math.trunc(options.cachePersistRetryBaseDelayMs ?? DEFAULT_CACHE_PERSIST_RETRY_BASE_DELAY_MS),
+  );
+  const cachePersistRetryMaxDelayMs = Math.max(
+    cachePersistRetryBaseDelayMs,
+    Math.trunc(options.cachePersistRetryMaxDelayMs ?? DEFAULT_CACHE_PERSIST_RETRY_MAX_DELAY_MS),
+  );
   const githubWebhookSecret = (options.githubWebhookSecret ?? '').trim();
   const fetchFn = options.fetchFn ?? globalThis.fetch;
+  const cachePersistenceQueue = cacheStore
+    ? createCachePersistenceQueue({
+      maxRetries: cachePersistMaxRetries,
+      retryBaseDelayMs: cachePersistRetryBaseDelayMs,
+      retryMaxDelayMs: cachePersistRetryMaxDelayMs,
+    })
+    : null;
 
   const rooms = new Map<string, RoomState>();
   const senderRateCounts = new Map<string, RateCounter>();
@@ -1311,22 +1337,24 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
     envelope: Envelope,
     roomCursorHint?: number,
   ): Promise<void> {
-    if (!cacheStore) return;
-    const kind = isIssueTopic(envelope.topic) ? 'issue' : 'object';
-    const key = `${envelope.room}/${envelope.id}`;
-    const updatedAt = nowEpochSec();
+    if (!cachePersistenceQueue) return;
     try {
-      await putCacheJsonObject({
-        kind,
-        key,
-        room: envelope.room,
-        ref: envelope.topic,
-        value: envelope,
-        updatedAt,
+      await cachePersistenceQueue.enqueue(async () => {
+        const kind = isIssueTopic(envelope.topic) ? 'issue' : 'object';
+        const key = `${envelope.room}/${envelope.id}`;
+        const updatedAt = nowEpochSec();
+        await putCacheJsonObject({
+          kind,
+          key,
+          room: envelope.room,
+          ref: envelope.topic,
+          value: envelope,
+          updatedAt,
+        });
+        if (kind === 'issue') {
+          await persistIssueProjectionToCache(envelope, roomCursorHint);
+        }
       });
-      if (kind === 'issue') {
-        await persistIssueProjectionToCache(envelope, roomCursorHint);
-      }
     } catch {
       // Cache failures should not affect relay publish availability.
     }
