@@ -209,7 +209,7 @@
 - [x] `just test` に新規テストを統合（失敗時に原因が追える粒度）
 - [x] 負荷計測シナリオを追加（multi-relay + cache hit/miss + issue sync）
 - [x] 監査ログとメトリクス（成功率、レイテンシ、再試行回数）を追加
-- [ ] ドキュメント更新（`README.md`, `docs/usage-guide-ja.md`, `docs/scaling.md`）
+- [x] ドキュメント更新（`README.md`, `docs/usage-guide-ja.md`, `docs/scaling.md`）
 
 ## 未確定事項（実装前に決める）
 

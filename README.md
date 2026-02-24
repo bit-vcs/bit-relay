@@ -11,11 +11,36 @@
 - `GET /health`
 - `POST /api/v1/publish?room=<room>&sender=<sender>&topic=notify&id=<id>&sig=<sig?>`
 - `GET /api/v1/poll?room=<room>&after=<cursor>&limit=<n>`
+- `POST /api/v1/review?room=<room>&sender=<sender>&pr_id=<id>&verdict=approve|deny`
+- `GET /api/v1/review?room=<room>&pr_id=<id>`
 - `GET /api/v1/inbox/pending?room=<room>&consumer=<consumer>&limit=<n>`
 - `POST /api/v1/inbox/ack?room=<room>&consumer=<consumer>`
 - `GET /ws?room=<room>`
 - `GET /api/v1/key/info?sender=<sender>`
 - `POST /api/v1/key/rotate`
+- `POST /api/v1/key/verify-github`
+
+### Cache Exchange / Issue Cache
+
+- `GET /api/v1/cache/exchange/discovery`
+- `GET /api/v1/cache/exchange/pull?after=<cursor>&limit=<n>&peer=<node_id>&room=<room?>`
+- `POST /api/v1/cache/exchange/push`
+- `GET /api/v1/cache/issues/pull?room=<room>&after=<cursor>&limit=<n>`
+- `GET /api/v1/cache/issues/sync?room=<room>&after=<cursor>&limit=<n>`
+
+### Trigger / Callback / GitHub Webhook
+
+- `POST /api/v1/trigger/callback`
+- `GET /api/v1/trigger/results?room=<room>&after=<cursor>&limit=<n>`
+- `POST /api/v1/github/webhook`
+- `GET /api/v1/github/webhook/dlq?after=<cursor>&limit=<n>`
+- `POST /api/v1/github/webhook/dlq/retry?delivery_id=<id>`
+
+### Admin APIs (auth required)
+
+- `POST /api/v1/admin/github/repos/register`
+- `POST /api/v1/admin/github/repos/<id>/push`
+- `POST /api/v1/admin/github/repos/<id>/actions/dispatch`
 
 ### Git Serve Session (relay-proxied clone)
 
@@ -46,6 +71,19 @@ Clone side → (response resolved)
 - `bithub` 互換として `{"payload": {...}}` のラップ形式も受理して展開
 - room validation: `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`
 - dedupe: room 内の同一 `id` は `accepted=false`
+
+## Observability
+
+構造化ログ（JSON line）を標準出力へ出します。
+
+- `relay_event`: incoming ref / issue sync / cache replication などのイベントログ
+- `relay_audit`: API の監査ログ
+- `relay_metric`: メトリクスログ
+
+代表的なメトリクス:
+
+- `relay.request.success_rate`: 操作単位の成功率・平均レイテンシ・再試行回数
+- `relay.cache.persist.retry`: cache 永続化の再試行回数
 
 ## Auth
 
@@ -134,6 +172,22 @@ optional env:
 - `RELAY_MAX_CLOCK_SKEW_SEC` (default: `300`)
 - `RELAY_NONCE_TTL_SEC` (default: `600`)
 - `RELAY_MAX_NONCES_PER_SENDER` (default: `2048`)
+- `RELAY_NODE_ID` (cache exchange ノード ID)
+- `RELAY_PEERS` (CSV: peer relay URLs)
+- `RELAY_PEERS_JSON` (JSON: peer relay URLs, `RELAY_PEERS` より優先)
+- `RELAY_PEER_AUTH_TOKEN` (peer pull 時の Bearer token)
+- `RELAY_PEER_SYNC_INTERVAL_SEC` (default: `30`)
+- `RELAY_CACHE_PROVIDER` (`memory` or `r2`, default: `memory`)
+- `RELAY_CACHE_TTL_SEC` (default: `86400`)
+- `RELAY_CACHE_MAX_BYTES` (任意、上限 bytes)
+- `RELAY_CACHE_R2_BUCKET` (R2 利用時)
+- `RELAY_CACHE_R2_PREFIX` (default: `relay-cache/`)
+- `RELAY_GITHUB_WEBHOOK_SECRET`
+- `RELAY_TRIGGER_WEBHOOK_URL`
+- `RELAY_TRIGGER_WEBHOOK_TOKEN`
+- `RELAY_TRIGGER_EVENT_TYPE` (default: `relay.incoming_ref`)
+- `RELAY_TRIGGER_REF_PREFIXES` (CSV, default: `refs/relay/incoming/`)
+- `RELAY_CONFIG_JSON` (JSON override)
 
 互換モード（従来の unsigned publish 許可）:
 
@@ -241,4 +295,15 @@ just test-serve https://myapp.exe.dev
 
 ```bash
 just test
+```
+
+## Benchmark
+
+```bash
+# 全シナリオ
+just bench https://bit-relay.mizchi.workers.dev
+
+# 新規: multi-relay + cache hit/miss + issue sync
+RELAY_URLS=https://relay-a.example,https://relay-b.example \
+  just bench-scenario multi-relay-cache-issue-sync https://relay-a.example
 ```

@@ -3,6 +3,8 @@
 bit-relay (Cloudflare Workers + Durable Objects) のスケーリング特性を k6
 ベンチマークで計測した結果をまとめる。
 
+2026-02-24 に、multi-relay + issue cache sync のベンチシナリオを追加した。
+
 ## 計測環境
 
 - ターゲット: `bit-relay.mizchi.workers.dev` (Cloudflare Workers)
@@ -70,6 +72,25 @@ MAX_WS_SESSIONS=100 の制約内。100 同時接続で全く問題なし。
 
 register は新規 DO 生成を伴うため ~400-600ms。セッション確立の 1 回コスト。
 
+### Multi-relay + Cache Hit/Miss + Issue Sync（新規シナリオ）
+
+`bench/scenarios/multi-relay-cache-issue-sync.js` を追加。
+
+- relay A で issue 作成/更新を publish
+- relay A -> B へ `cache/exchange` pull/push
+- relay B で `cache/issues/pull` の miss/hit と `cache/issues/sync` を計測
+
+計測メトリクス:
+
+- `mr_issue_publish_latency`
+- `mr_exchange_pull_latency`
+- `mr_exchange_push_latency`
+- `mr_cache_issue_pull_miss_latency`
+- `mr_cache_issue_pull_hit_latency`
+- `mr_issue_sync_latency`
+- `mr_cache_hit_count`
+- `mr_cache_miss_count`
+
 ## スケーリング特性
 
 ### ボトルネックにならなかったもの
@@ -112,6 +133,10 @@ just bench https://bit-relay.mizchi.workers.dev
 just bench-scenario health https://bit-relay.mizchi.workers.dev
 just bench-scenario publish-poll https://bit-relay.mizchi.workers.dev
 just bench-scenario publish-contention https://bit-relay.mizchi.workers.dev
+
+# 新規: 複数 relay 前提シナリオ
+RELAY_URLS=https://relay-a.example,https://relay-b.example \
+  just bench-scenario multi-relay-cache-issue-sync https://relay-a.example
 
 # JSON 出力
 just bench-json https://bit-relay.mizchi.workers.dev

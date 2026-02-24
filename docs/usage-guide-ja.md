@@ -202,6 +202,39 @@ bit relay sync push relay+https://bit-relay.mizchi.workers.dev
 | `relay+http://host`     | relay API を直接使用（非 TLS、ローカル開発用） |
 | `https://host/repo.git` | smart-http を試行、404 時に relay fallback     |
 
+## 運用者向け API（キャッシュ/同期）
+
+relay 運用者向けに、issue キャッシュと relay 間交換の確認 API を用意している。
+
+### issue キャッシュを直接確認する
+
+```bash
+# issue イベントをカーソルで取得
+curl "http://127.0.0.1:8788/api/v1/cache/issues/pull?room=main&after=0&limit=20"
+
+# issue snapshot + incremental event を取得
+curl "http://127.0.0.1:8788/api/v1/cache/issues/sync?room=main&after=0&limit=20"
+```
+
+### relay 間 cache exchange を手動確認する
+
+```bash
+# A から pull して
+curl "http://relay-a.local/api/v1/cache/exchange/pull?after=0&limit=50&peer=relay-b" > /tmp/exchange.json
+
+# B に push
+curl -X POST "http://relay-b.local/api/v1/cache/exchange/push" \
+  -H "content-type: application/json" \
+  --data @/tmp/exchange.json
+```
+
+### 負荷試験（multi-relay + cache hit/miss + issue sync）
+
+```bash
+RELAY_URLS=http://127.0.0.1:8788,http://127.0.0.1:8789 \
+  just bench-scenario multi-relay-cache-issue-sync http://127.0.0.1:8788
+```
+
 ## フルワークフロー: Alice と Bob
 
 ### Alice（ホスト側）
