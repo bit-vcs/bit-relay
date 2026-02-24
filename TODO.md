@@ -109,7 +109,7 @@
 
 ### TODO
 
-- [ ] CacheStore 抽象（memory / R2 / 将来 S3）を追加
+- [x] CacheStore 抽象（memory / R2 / 将来 S3）を追加
 - [ ] 通信通過データの write-through 保存（objects, pack, refs, issues）
 - [ ] キャッシュ索引（content hash, ref, room, updated_at）を定義
 - [ ] R2 から clone/fetch 可能な read path を追加
@@ -118,7 +118,7 @@
 ### TDD
 
 - [ ] 探索: 大容量 pack の分割戦略・整合性検証方法を決める
-- [ ] Red: CacheStore contract test（同一テストを memory/R2 両方で実行）
+- [x] Red: CacheStore contract test（同一テストを memory/R2 両方で実行）
 - [ ] Red: node down 時の cache hit E2E
 - [ ] Green: write-through + read fallback 実装
 - [ ] Refactor: 永続化キュー/再試行を分離
