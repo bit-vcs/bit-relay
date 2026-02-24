@@ -170,7 +170,7 @@
 - [x] Red: webhook 署名検証テスト
 - [x] Red: 同一イベント再送テスト（重複抑止）
 - [x] Green: mapper + apply 実装
-- [ ] Refactor: provider 非依存の issue sync engine へ分離
+- [x] Refactor: provider 非依存の issue sync engine へ分離
 
 ### 完了条件
 
@@ -183,23 +183,23 @@
 
 ### TODO
 
-- [ ] incoming ref 検知フックを追加（serve/push 受信時）
-- [ ] TriggerDispatcher 抽象（GitHub Actions / 汎用 Webhook）
-- [ ] CI 実行結果の受信 API（status, logs URL, artifact URL）
-- [ ] CI 結果を relay event として保存・通知
+- [x] incoming ref 検知フックを追加（serve/push 受信時）
+- [x] TriggerDispatcher 抽象（GitHub Actions / 汎用 Webhook）
+- [x] CI 実行結果の受信 API（status, logs URL, artifact URL）
+- [x] CI 結果を relay event として保存・通知
 
 ### TDD
 
-- [ ] 探索: `refs/relay/incoming/*` から CI ジョブ識別子への変換規則を決める
-- [ ] Red: ref 受信 -> dispatch 呼び出しテスト
-- [ ] Red: CI callback 受信 -> 状態遷移テスト
-- [ ] Green: trigger + callback 実装
+- [x] 探索: `refs/relay/incoming/*` から CI ジョブ識別子への変換規則を決める
+- [x] Red: ref 受信 -> dispatch 呼び出しテスト
+- [x] Red: CI callback 受信 -> 状態遷移テスト
+- [x] Green: trigger + callback 実装
 - [ ] Refactor: trigger rule を設定駆動化
 
 ### 完了条件
 
-- [ ] incoming ref 受信で外部 CI が起動される
-- [ ] CI 結果が relay 経由で購読/取得できる
+- [x] incoming ref 受信で外部 CI が起動される
+- [x] CI 結果が relay 経由で購読/取得できる
 
 ---
 

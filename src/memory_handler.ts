@@ -15,6 +15,7 @@ import {
   parseIncomingCacheExchangeEntry,
   selectCacheExchangeEntries,
 } from './cache_exchange.ts';
+import { createIssueSyncEngine } from './issue_sync_engine.ts';
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
@@ -193,17 +194,6 @@ interface IssueCacheCursorRecord {
   updated_at: number;
 }
 
-interface GitHubWebhookDlqEntry {
-  delivery_id: string;
-  event: string;
-  body: string;
-  created_at: number;
-  updated_at: number;
-  retry_count: number;
-  next_retry_at: number;
-  last_error: string;
-}
-
 export interface RelaySnapshot {
   rooms: Record<string, SnapshotRoom>;
   keys_by_sender: Record<string, SnapshotKeyRecord>;
@@ -273,6 +263,7 @@ const DEFAULT_CACHE_EXCHANGE_MAX_RECORDS = 10_000;
 const MAX_GITHUB_WEBHOOK_DELIVERY_IDS = 10_000;
 const MAX_GITHUB_WEBHOOK_DLQ_ENTRIES = 10_000;
 const GITHUB_WEBHOOK_RETRY_BASE_SEC = 30;
+const INCOMING_TRIGGER_REF_PREFIX = 'refs/relay/incoming/';
 const ISSUE_EVENT_KEY_PREFIX = 'issue/events/';
 const ISSUE_SNAPSHOT_KEY_PREFIX = 'issue/snapshots/';
 const ISSUE_CURSOR_KEY_PREFIX = 'issue/cursors/';
@@ -330,6 +321,18 @@ function normalizeAfter(raw: string | null, fallback: number): number {
 
 function normalizeRoom(raw: string | null): string {
   return (raw ?? DEFAULT_ROOM).trim();
+}
+
+function deriveRoomFromIncomingRef(ref: string): string {
+  const trimmed = ref.trim();
+  if (!trimmed.startsWith(INCOMING_TRIGGER_REF_PREFIX)) {
+    return DEFAULT_ROOM;
+  }
+  const suffix = trimmed.slice(INCOMING_TRIGGER_REF_PREFIX.length).trim();
+  if (suffix.length === 0) return DEFAULT_ROOM;
+  const first = suffix.split('/')[0].trim();
+  if (!isValidRoomName(first)) return DEFAULT_ROOM;
+  return first;
 }
 
 function generateRelayNodeId(): string {
@@ -1379,9 +1382,6 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
   const noncesBySender = new Map<string, Map<string, number>>();
   const cacheExchangeRecords: CacheExchangeRecord[] = [];
   const issueCursorByRoom = new Map<string, number>();
-  const githubWebhookDeliveryIds = new Map<string, number>();
-  const githubWebhookDlq = new Map<string, GitHubWebhookDlqEntry>();
-  const githubWebhookDlqOrder: string[] = [];
   let cacheExchangeCursor = 0;
   let lastReapAt = Date.now();
 
@@ -1408,92 +1408,12 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
       maxHops,
     });
   }
-
-  function hasGitHubDeliveryId(deliveryId: string): boolean {
-    return githubWebhookDeliveryIds.has(deliveryId);
-  }
-
-  function rememberGitHubDeliveryId(deliveryId: string, nowSec: number): void {
-    githubWebhookDeliveryIds.set(deliveryId, nowSec);
-    if (githubWebhookDeliveryIds.size <= MAX_GITHUB_WEBHOOK_DELIVERY_IDS) return;
-    const overflow = githubWebhookDeliveryIds.size - MAX_GITHUB_WEBHOOK_DELIVERY_IDS;
-    let removed = 0;
-    for (const key of githubWebhookDeliveryIds.keys()) {
-      githubWebhookDeliveryIds.delete(key);
-      removed += 1;
-      if (removed >= overflow) break;
-    }
-  }
-
-  function computeGitHubWebhookNextRetryAt(nowSec: number, retryCount: number): number {
-    const exponential = Math.min(
-      3600,
-      GITHUB_WEBHOOK_RETRY_BASE_SEC * Math.max(1, 2 ** retryCount),
-    );
-    return nowSec + exponential;
-  }
-
-  function enqueueGitHubWebhookDlq(args: {
-    deliveryId: string;
-    event: string;
-    body: string;
-    error: string;
-    incrementRetry: boolean;
-  }): GitHubWebhookDlqEntry {
-    const nowSec = nowEpochSec();
-    const existing = githubWebhookDlq.get(args.deliveryId);
-    const retryCount = existing
-      ? existing.retry_count + (args.incrementRetry ? 1 : 0)
-      : (args.incrementRetry ? 1 : 0);
-    const entry: GitHubWebhookDlqEntry = {
-      delivery_id: args.deliveryId,
-      event: args.event,
-      body: args.body,
-      created_at: existing ? existing.created_at : nowSec,
-      updated_at: nowSec,
-      retry_count: retryCount,
-      next_retry_at: computeGitHubWebhookNextRetryAt(nowSec, retryCount),
-      last_error: args.error,
-    };
-    githubWebhookDlq.set(args.deliveryId, entry);
-    if (!existing) {
-      githubWebhookDlqOrder.push(args.deliveryId);
-    }
-    if (githubWebhookDlqOrder.length > MAX_GITHUB_WEBHOOK_DLQ_ENTRIES) {
-      const overflow = githubWebhookDlqOrder.length - MAX_GITHUB_WEBHOOK_DLQ_ENTRIES;
-      for (let i = 0; i < overflow; i += 1) {
-        const removedId = githubWebhookDlqOrder.shift();
-        if (!removedId) break;
-        githubWebhookDlq.delete(removedId);
-      }
-    }
-    return entry;
-  }
-
-  function removeGitHubWebhookDlq(deliveryId: string): void {
-    if (!githubWebhookDlq.delete(deliveryId)) return;
-    const index = githubWebhookDlqOrder.indexOf(deliveryId);
-    if (index >= 0) {
-      githubWebhookDlqOrder.splice(index, 1);
-    }
-  }
-
-  function listGitHubWebhookDlq(after: number, limit: number): {
-    entries: GitHubWebhookDlqEntry[];
-    nextCursor: number;
-  } {
-    const pageIds = githubWebhookDlqOrder.slice(after, after + limit);
-    const entries: GitHubWebhookDlqEntry[] = [];
-    for (const deliveryId of pageIds) {
-      const entry = githubWebhookDlq.get(deliveryId);
-      if (entry) entries.push(entry);
-    }
-    const next = after + pageIds.length;
-    return {
-      entries,
-      nextCursor: next < githubWebhookDlqOrder.length ? next : after + entries.length,
-    };
-  }
+  const githubIssueSync = createIssueSyncEngine({
+    maxDeliveryIds: MAX_GITHUB_WEBHOOK_DELIVERY_IDS,
+    maxDlqEntries: MAX_GITHUB_WEBHOOK_DLQ_ENTRIES,
+    retryBaseSec: GITHUB_WEBHOOK_RETRY_BASE_SEC,
+    nowSec: nowEpochSec,
+  });
 
   async function putCacheJsonObject(args: {
     kind: 'issue' | 'object';
@@ -2495,108 +2415,85 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
     if (event.length === 0) {
       return { ok: false, deliveryId, event, error: 'missing github event' };
     }
-
-    if (hasGitHubDeliveryId(deliveryId)) {
-      return {
-        ok: true,
-        accepted: false,
-        duplicate: true,
-        deliveryId,
-        event,
-        action: '',
-        topic: null,
-        room: null,
-        issueId: null,
-        cursor: null,
-      };
-    }
-
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(args.requestBody);
-    } catch {
-      return { ok: false, deliveryId, event, error: 'invalid json payload' };
-    }
-    if (!isObjectRecord(parsed)) {
-      return { ok: false, deliveryId, event, error: 'invalid json payload' };
-    }
-
-    const action = (typeof parsed.action === 'string' ? parsed.action : '').trim().toLowerCase();
-    const topic = mapGitHubWebhookTopic(event, action);
-    if (!topic || !isValidTopic(topic)) {
-      return { ok: false, deliveryId, event, error: 'unsupported github webhook event/action' };
-    }
-
-    const repositoryFullName = readGitHubRepositoryFullName(parsed);
-    const room = normalizeGitHubRoomName(repositoryFullName);
-    const issueNumber = readGitHubIssueNumber(parsed);
-    const issueId = buildGitHubIssueId(repositoryFullName, issueNumber, deliveryId);
-    const issueUpdatedAtMs = readGitHubIssueUpdatedAtMs(parsed);
-    const envelopePayload = buildGitHubIssuePayload({
-      deliveryId,
+    const applied = await githubIssueSync.applyDelivery({
       event,
-      action,
-      issueId,
-      repositoryFullName,
-      parsed,
+      deliveryId,
+      requestBody: args.requestBody,
+      map(input) {
+        const action = (typeof input.parsed.action === 'string' ? input.parsed.action : '')
+          .trim()
+          .toLowerCase();
+        const topic = mapGitHubWebhookTopic(event, action);
+        if (!topic || !isValidTopic(topic)) {
+          return { ok: false, error: 'unsupported github webhook event/action' };
+        }
+
+        const repositoryFullName = readGitHubRepositoryFullName(input.parsed);
+        const room = normalizeGitHubRoomName(repositoryFullName);
+        const issueNumber = readGitHubIssueNumber(input.parsed);
+        const issueId = buildGitHubIssueId(repositoryFullName, issueNumber, input.deliveryId);
+        const issueUpdatedAtMs = readGitHubIssueUpdatedAtMs(input.parsed);
+        const envelopePayload = buildGitHubIssuePayload({
+          deliveryId: input.deliveryId,
+          event,
+          action,
+          issueId,
+          repositoryFullName,
+          parsed: input.parsed,
+        });
+        if (issueUpdatedAtMs !== null) {
+          envelopePayload.source_updated_at_ms = issueUpdatedAtMs;
+        }
+        const sender = readGitHubSender(input.parsed);
+        return {
+          ok: true,
+          mapped: {
+            room,
+            sender,
+            topic,
+            issueId,
+            action,
+            envelopeId: `gh-${input.deliveryId}`,
+            payload: envelopePayload,
+          },
+        };
+      },
+      async publish(mapped) {
+        if (!isJsonValue(mapped.payload)) {
+          return { status: 400, accepted: false, cursor: null };
+        }
+        const roomState = getOrCreateRoomState(rooms, mapped.room);
+        const result = publishIntoRoom(
+          roomState,
+          mapped.room,
+          mapped.sender,
+          mapped.topic,
+          mapped.envelopeId,
+          '',
+          mapped.payload,
+          maxMessagesPerRoom,
+        );
+
+        if (
+          result.changed &&
+          result.status === 200 &&
+          result.envelope &&
+          result.body.accepted === true &&
+          typeof result.body.cursor === 'number'
+        ) {
+          broadcastPublish(roomState, mapped.room, result.envelope, result.body.cursor as number);
+          recordCacheExchange(result.envelope, relayNodeId, 0, cacheExchangeMaxHops);
+          await persistEnvelopeToCache(result.envelope, result.body.cursor as number);
+        }
+
+        return {
+          status: result.status,
+          accepted: result.body.accepted === true,
+          cursor: typeof result.body.cursor === 'number' ? result.body.cursor : null,
+        };
+      },
     });
-    if (issueUpdatedAtMs !== null) {
-      envelopePayload.source_updated_at_ms = issueUpdatedAtMs;
-    }
-    const sender = readGitHubSender(parsed);
-    const envelopeId = `gh-${deliveryId}`;
-    const nowSec = nowEpochSec();
-
-    const roomState = getOrCreateRoomState(rooms, room);
-    const result = publishIntoRoom(
-      roomState,
-      room,
-      sender,
-      topic,
-      envelopeId,
-      '',
-      envelopePayload,
-      maxMessagesPerRoom,
-    );
-
-    if (
-      result.changed &&
-      result.status === 200 &&
-      result.envelope &&
-      result.body.accepted === true &&
-      typeof result.body.cursor === 'number'
-    ) {
-      broadcastPublish(roomState, room, result.envelope, result.body.cursor as number);
-      recordCacheExchange(result.envelope, relayNodeId, 0, cacheExchangeMaxHops);
-      await persistEnvelopeToCache(result.envelope, result.body.cursor as number);
-    }
-
-    if (result.status !== 200) {
-      return {
-        ok: false,
-        deliveryId,
-        event,
-        error: `publish failed: status=${result.status}`,
-      };
-    }
-
-    const accepted = result.body.accepted === true;
-    rememberGitHubDeliveryId(deliveryId, nowSec);
-    if (accepted) {
-      removeGitHubWebhookDlq(deliveryId);
-    }
-    return {
-      ok: true,
-      accepted,
-      duplicate: !accepted,
-      deliveryId,
-      event,
-      action,
-      topic,
-      room,
-      issueId,
-      cursor: typeof result.body.cursor === 'number' ? result.body.cursor : null,
-    };
+    return applied;
   }
 
   async function handleGitHubWebhook(request: Request): Promise<Response> {
@@ -2628,7 +2525,7 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
 
     const result = await applyGitHubWebhookDelivery({ event, deliveryId, requestBody });
     if (!result.ok) {
-      const queued = enqueueGitHubWebhookDlq({
+      const queued = githubIssueSync.enqueueDlq({
         deliveryId,
         event,
         body: requestBody,
@@ -2672,7 +2569,7 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
     }
     const after = normalizeAfter(url.searchParams.get('after'), 0);
     const limit = normalizeLimit(url.searchParams.get('limit'), 100);
-    const listed = listGitHubWebhookDlq(after, limit);
+    const listed = githubIssueSync.listDlq(after, limit);
     return Response.json(
       {
         ok: true,
@@ -2699,7 +2596,7 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
     if (deliveryId.length === 0) {
       return toErrorResponse('missing query: delivery_id', 400);
     }
-    const found = githubWebhookDlq.get(deliveryId);
+    const found = githubIssueSync.getDlqEntry(deliveryId);
     if (!found) {
       return toErrorResponse('delivery_id not found in dlq', 404);
     }
@@ -2710,7 +2607,7 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
       requestBody: found.body,
     });
     if (result.ok) {
-      removeGitHubWebhookDlq(deliveryId);
+      githubIssueSync.removeDlq(deliveryId);
       return Response.json(
         {
           ok: true,
@@ -2728,7 +2625,7 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
       );
     }
 
-    const queued = enqueueGitHubWebhookDlq({
+    const queued = githubIssueSync.enqueueDlq({
       deliveryId: found.delivery_id,
       event: found.event,
       body: found.body,
@@ -2745,6 +2642,139 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
         error: queued.last_error,
         retry_count: queued.retry_count,
         next_retry_at: queued.next_retry_at,
+      },
+      { status: 200 },
+    );
+  }
+
+  async function handleTriggerCallback(request: Request): Promise<Response> {
+    if (request.method !== 'POST') {
+      return methodNotAllowedResponse();
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(await request.text());
+    } catch {
+      return toErrorResponse('invalid json payload', 400);
+    }
+    if (!isObjectRecord(parsed)) {
+      return toErrorResponse('invalid json payload', 400);
+    }
+
+    const ref = (typeof parsed.ref === 'string' ? parsed.ref : '').trim();
+    if (ref.length === 0) {
+      return toErrorResponse('missing field: ref', 400);
+    }
+    const status = (typeof parsed.status === 'string' ? parsed.status : '').trim().toLowerCase();
+    if (status.length === 0) {
+      return toErrorResponse('missing field: status', 400);
+    }
+
+    const requestedRoom = (typeof parsed.room === 'string' ? parsed.room : '').trim();
+    const room = requestedRoom.length > 0 ? requestedRoom : deriveRoomFromIncomingRef(ref);
+    if (!isValidRoomName(room)) {
+      return invalidRoomResponse();
+    }
+    const roomTokenError = checkRoomToken(request, room);
+    if (roomTokenError) return roomTokenError;
+
+    const logsUrl = typeof parsed.logs_url === 'string' ? parsed.logs_url : '';
+    const artifactUrl = typeof parsed.artifact_url === 'string' ? parsed.artifact_url : '';
+    const externalId = typeof parsed.external_id === 'string' ? parsed.external_id : '';
+    const provider = typeof parsed.provider === 'string' ? parsed.provider : '';
+    const callbackId = (typeof parsed.id === 'string' ? parsed.id : '').trim();
+    const envelopeId = callbackId.length > 0
+      ? callbackId
+      : externalId.trim().length > 0
+      ? `ci-${externalId.trim()}`
+      : `ci-${crypto.randomUUID()}`;
+    const receivedAt = nowEpochSec();
+
+    const payload: JsonObject = {
+      source: 'ci',
+      ref,
+      status,
+      logs_url: logsUrl,
+      artifact_url: artifactUrl,
+      external_id: externalId,
+      provider,
+      received_at: receivedAt,
+    };
+
+    const roomState = getOrCreateRoomState(rooms, room);
+    const result = publishIntoRoom(
+      roomState,
+      room,
+      'ci:callback',
+      'ci.result',
+      envelopeId,
+      '',
+      payload,
+      maxMessagesPerRoom,
+    );
+
+    if (
+      result.changed &&
+      result.status === 200 &&
+      result.envelope &&
+      result.body.accepted === true &&
+      typeof result.body.cursor === 'number'
+    ) {
+      broadcastPublish(roomState, room, result.envelope, result.body.cursor as number);
+      recordCacheExchange(result.envelope, relayNodeId, 0, cacheExchangeMaxHops);
+      await persistEnvelopeToCache(result.envelope, result.body.cursor as number);
+    }
+
+    return Response.json(
+      {
+        ok: result.status === 200,
+        accepted: result.body.accepted === true,
+        room,
+        topic: 'ci.result',
+        id: envelopeId,
+        ref,
+        status,
+        cursor: typeof result.body.cursor === 'number' ? result.body.cursor : null,
+      },
+      { status: result.status },
+    );
+  }
+
+  function handleTriggerResults(request: Request, url: URL): Response {
+    if (request.method !== 'GET') {
+      return methodNotAllowedResponse();
+    }
+    const room = normalizeRoom(url.searchParams.get('room'));
+    if (!isValidRoomName(room)) {
+      return invalidRoomResponse();
+    }
+    const roomTokenError = checkRoomToken(request, room);
+    if (roomTokenError) return roomTokenError;
+
+    const after = normalizeAfter(url.searchParams.get('after'), 0);
+    const limit = normalizeLimit(url.searchParams.get('limit'), 100);
+    const roomState = getOrCreateRoomState(rooms, room);
+    const results: JsonObject[] = [];
+    let nextCursor = after;
+
+    for (let i = after; i < roomState.messages.length; i += 1) {
+      const envelope = roomState.messages[i];
+      nextCursor = i + 1;
+      if (envelope.topic !== 'ci.result') continue;
+      results.push({
+        cursor: i + 1,
+        ...sanitizeEnvelope(envelope),
+      });
+      if (results.length >= limit) break;
+    }
+
+    return Response.json(
+      {
+        ok: true,
+        room,
+        next_cursor: results.length > 0 ? nextCursor : after,
+        results,
       },
       { status: 200 },
     );
@@ -2793,6 +2823,14 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
 
     if (pathname === '/api/v1/github/webhook/dlq/retry') {
       return handleGitHubWebhookDlqRetry(request, url);
+    }
+
+    if (pathname === '/api/v1/trigger/callback') {
+      return handleTriggerCallback(request);
+    }
+
+    if (pathname === '/api/v1/trigger/results') {
+      return handleTriggerResults(request, url);
     }
 
     if (pathname === '/api/v1/cache/exchange/discovery') {
@@ -3314,28 +3352,7 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
       issueCursorSnapshot[room] = normalized;
     }
 
-    const githubWebhookDeliveriesSnapshot: Record<string, number> = {};
-    for (const [deliveryId, ts] of githubWebhookDeliveryIds.entries()) {
-      if (deliveryId.trim().length === 0) continue;
-      if (!Number.isFinite(ts)) continue;
-      githubWebhookDeliveriesSnapshot[deliveryId] = Math.max(0, Math.trunc(ts));
-    }
-
-    const githubWebhookDlqSnapshot: SnapshotGitHubWebhookDlqEntry[] = [];
-    for (const deliveryId of githubWebhookDlqOrder) {
-      const entry = githubWebhookDlq.get(deliveryId);
-      if (!entry) continue;
-      githubWebhookDlqSnapshot.push({
-        delivery_id: entry.delivery_id,
-        event: entry.event,
-        body: entry.body,
-        created_at: entry.created_at,
-        updated_at: entry.updated_at,
-        retry_count: entry.retry_count,
-        next_retry_at: entry.next_retry_at,
-        last_error: entry.last_error,
-      });
-    }
+    const githubWebhookSnapshot = githubIssueSync.snapshot();
 
     return {
       rooms: snapshotRooms,
@@ -3347,12 +3364,12 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
       ...(Object.keys(issueCursorSnapshot).length > 0
         ? { issue_cursors: issueCursorSnapshot }
         : {}),
-      ...(Object.keys(githubWebhookDeliveriesSnapshot).length > 0 ||
-          githubWebhookDlqSnapshot.length > 0
+      ...(Object.keys(githubWebhookSnapshot.deliveries).length > 0 ||
+          githubWebhookSnapshot.dlq.length > 0
         ? {
           github_webhook: {
-            deliveries: githubWebhookDeliveriesSnapshot,
-            dlq: githubWebhookDlqSnapshot,
+            deliveries: githubWebhookSnapshot.deliveries,
+            dlq: githubWebhookSnapshot.dlq,
           },
         }
         : {}),
@@ -3444,9 +3461,7 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
     keyRegistry.clear();
     noncesBySender.clear();
     issueCursorByRoom.clear();
-    githubWebhookDeliveryIds.clear();
-    githubWebhookDlq.clear();
-    githubWebhookDlqOrder.splice(0, githubWebhookDlqOrder.length);
+    githubIssueSync.restore({ deliveries: {}, dlq: [] });
     cacheExchangeRecords.splice(0, cacheExchangeRecords.length);
     cacheExchangeCursor = 0;
 
@@ -3601,53 +3616,7 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
     }
 
     if (isObjectRecord(snapshotData.github_webhook)) {
-      if (isObjectRecord(snapshotData.github_webhook.deliveries)) {
-        for (const [deliveryId, tsRaw] of Object.entries(snapshotData.github_webhook.deliveries)) {
-          if (deliveryId.trim().length === 0) continue;
-          if (typeof tsRaw !== 'number' || !Number.isFinite(tsRaw)) continue;
-          githubWebhookDeliveryIds.set(deliveryId, Math.max(0, Math.trunc(tsRaw)));
-        }
-      }
-      if (Array.isArray(snapshotData.github_webhook.dlq)) {
-        for (const value of snapshotData.github_webhook.dlq) {
-          if (!isObjectRecord(value)) continue;
-          const deliveryId = (typeof value.delivery_id === 'string' ? value.delivery_id : '')
-            .trim();
-          if (deliveryId.length === 0) continue;
-          const event = (typeof value.event === 'string' ? value.event : '').trim();
-          const body = typeof value.body === 'string' ? value.body : '';
-          const createdAt =
-            typeof value.created_at === 'number' && Number.isFinite(value.created_at)
-              ? Math.max(0, Math.trunc(value.created_at))
-              : 0;
-          const updatedAt =
-            typeof value.updated_at === 'number' && Number.isFinite(value.updated_at)
-              ? Math.max(0, Math.trunc(value.updated_at))
-              : createdAt;
-          const retryCount =
-            typeof value.retry_count === 'number' && Number.isFinite(value.retry_count)
-              ? Math.max(0, Math.trunc(value.retry_count))
-              : 0;
-          const nextRetryAt =
-            typeof value.next_retry_at === 'number' && Number.isFinite(value.next_retry_at)
-              ? Math.max(0, Math.trunc(value.next_retry_at))
-              : computeGitHubWebhookNextRetryAt(nowEpochSec(), retryCount);
-          const lastError = typeof value.last_error === 'string' ? value.last_error : '';
-
-          githubWebhookDlq.set(deliveryId, {
-            delivery_id: deliveryId,
-            event,
-            body,
-            created_at: createdAt,
-            updated_at: updatedAt,
-            retry_count: retryCount,
-            next_retry_at: nextRetryAt,
-            last_error: lastError,
-          });
-          githubWebhookDlqOrder.push(deliveryId);
-          if (githubWebhookDlqOrder.length >= MAX_GITHUB_WEBHOOK_DLQ_ENTRIES) break;
-        }
-      }
+      githubIssueSync.restore(snapshotData.github_webhook);
     }
 
     let restoredCacheExchange = false;
