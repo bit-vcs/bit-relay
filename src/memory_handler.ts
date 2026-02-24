@@ -8,7 +8,7 @@ import {
   verifyEd25519Signature,
 } from './signing.ts';
 import { fetchGitHubEd25519Keys, matchesGitHubKey } from './github_keys.ts';
-import type { CacheStore, CacheStoreListResult, CacheStoreObject } from './cache_store.ts';
+import type { CacheStore } from './cache_store.ts';
 import {
   type CacheExchangeRecord,
   classifyCacheExchangeCollision,
@@ -16,24 +16,7 @@ import {
   selectCacheExchangeEntries,
 } from './cache_exchange.ts';
 import { createIssueSyncEngine } from './issue_sync_engine.ts';
-import {
-  deriveIssueAction,
-  extractIssueIdFromEnvelope,
-  isIssueTopic,
-  type IssueCacheCursorRecord,
-  type IssueCacheEventRecord,
-  type IssueCacheSnapshotRecord,
-  issueCursorStorageKey,
-  issueEventStorageKey,
-  issueSnapshotStorageKey,
-  parseCachedIssueEnvelope,
-  parseIssueCacheCursorRecord,
-  parseIssueCacheEventRecord,
-  parseIssueCacheSnapshotRecord,
-  parseIssueEventCursorFromKey,
-  parseIssueSourceUpdatedAtMs,
-} from './issue_projection.ts';
-import { createCachePersistenceQueue } from './cache_persistence_queue.ts';
+import { createRelayCacheAdapter } from './relay_cache_adapter.ts';
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
@@ -250,9 +233,6 @@ const DEFAULT_WS_PING_INTERVAL_MS = 30_000;
 const DEFAULT_WS_IDLE_TIMEOUT_MS = 90_000;
 const DEFAULT_CACHE_EXCHANGE_MAX_HOPS = 3;
 const DEFAULT_CACHE_EXCHANGE_MAX_RECORDS = 10_000;
-const DEFAULT_CACHE_PERSIST_MAX_RETRIES = 2;
-const DEFAULT_CACHE_PERSIST_RETRY_BASE_DELAY_MS = 20;
-const DEFAULT_CACHE_PERSIST_RETRY_MAX_DELAY_MS = 500;
 const MAX_GITHUB_WEBHOOK_DELIVERY_IDS = 10_000;
 const MAX_GITHUB_WEBHOOK_DLQ_ENTRIES = 10_000;
 const GITHUB_WEBHOOK_RETRY_BASE_SEC = 30;
@@ -357,11 +337,6 @@ function isValidRoomName(room: string): boolean {
 function isValidTopic(topic: string): boolean {
   return TOPIC_PATTERN.test(topic);
 }
-
-const issueProjectionValidators = {
-  isValidRoomName: (room: string) => isValidRoomName(room),
-  isValidTopic: (topic: string) => isValidTopic(topic),
-};
 
 function invalidRoomResponse(): Response {
   return Response.json({ ok: false, error: 'invalid room' }, { status: 400 });
@@ -1122,27 +1097,17 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
     Math.trunc(options.cacheExchangeMaxRecords ?? DEFAULT_CACHE_EXCHANGE_MAX_RECORDS),
   );
   const cacheStore = options.cacheStore ?? null;
-  const cachePersistMaxRetries = Math.max(
-    0,
-    Math.trunc(options.cachePersistMaxRetries ?? DEFAULT_CACHE_PERSIST_MAX_RETRIES),
-  );
-  const cachePersistRetryBaseDelayMs = Math.max(
-    0,
-    Math.trunc(options.cachePersistRetryBaseDelayMs ?? DEFAULT_CACHE_PERSIST_RETRY_BASE_DELAY_MS),
-  );
-  const cachePersistRetryMaxDelayMs = Math.max(
-    cachePersistRetryBaseDelayMs,
-    Math.trunc(options.cachePersistRetryMaxDelayMs ?? DEFAULT_CACHE_PERSIST_RETRY_MAX_DELAY_MS),
-  );
   const githubWebhookSecret = (options.githubWebhookSecret ?? '').trim();
   const fetchFn = options.fetchFn ?? globalThis.fetch;
-  const cachePersistenceQueue = cacheStore
-    ? createCachePersistenceQueue({
-      maxRetries: cachePersistMaxRetries,
-      retryBaseDelayMs: cachePersistRetryBaseDelayMs,
-      retryMaxDelayMs: cachePersistRetryMaxDelayMs,
-    })
-    : null;
+  const cacheAdapter = createRelayCacheAdapter({
+    cacheStore,
+    isValidRoomName,
+    isValidTopic,
+    nowSec: nowEpochSec,
+    cachePersistMaxRetries: options.cachePersistMaxRetries,
+    cachePersistRetryBaseDelayMs: options.cachePersistRetryBaseDelayMs,
+    cachePersistRetryMaxDelayMs: options.cachePersistRetryMaxDelayMs,
+  });
 
   const rooms = new Map<string, RoomState>();
   const senderRateCounts = new Map<string, RateCounter>();
@@ -1151,7 +1116,6 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
   const keyRegistry = new Map<string, KeyRecord>();
   const noncesBySender = new Map<string, Map<string, number>>();
   const cacheExchangeRecords: CacheExchangeRecord[] = [];
-  const issueCursorByRoom = new Map<string, number>();
   let cacheExchangeCursor = 0;
   let lastReapAt = Date.now();
 
@@ -1185,179 +1149,11 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
     nowSec: nowEpochSec,
   });
 
-  async function putCacheJsonObject(args: {
-    kind: 'issue' | 'object';
-    key: string;
-    room: string;
-    ref: string;
-    value: unknown;
-    updatedAt: number;
-  }): Promise<void> {
-    if (!cacheStore) return;
-    const bodyText = JSON.stringify(args.value);
-    const hashInput = isJsonValue(args.value) ? canonicalizeJson(args.value) : bodyText;
-    const contentHash = await sha256Hex(hashInput);
-    await cacheStore.put({
-      kind: args.kind,
-      key: args.key,
-      body: new TextEncoder().encode(bodyText),
-      room: args.room,
-      ref: args.ref,
-      contentHash,
-      contentType: 'application/json',
-      updatedAt: args.updatedAt,
-    });
-  }
-
-  async function readIssueCursorFromCache(room: string): Promise<number> {
-    if (!cacheStore) return 0;
-    const cached = await cacheStore.get('object', issueCursorStorageKey(room));
-    if (!cached) return 0;
-    const parsed = parseIssueCacheCursorRecord(cached, isValidRoomName);
-    if (!parsed) return 0;
-    if (parsed.room !== room) return 0;
-    return parsed.cursor;
-  }
-
-  async function currentIssueCursor(room: string): Promise<number> {
-    const inMemory = issueCursorByRoom.get(room) ?? 0;
-    if (!cacheStore) return inMemory;
-    let persisted = 0;
-    try {
-      persisted = await readIssueCursorFromCache(room);
-    } catch {
-      persisted = 0;
-    }
-    const current = Math.max(inMemory, persisted);
-    issueCursorByRoom.set(room, current);
-    return current;
-  }
-
-  async function nextIssueCursor(room: string, roomCursorHint?: number): Promise<number> {
-    const current = await currentIssueCursor(room);
-    const hint = typeof roomCursorHint === 'number' && Number.isFinite(roomCursorHint)
-      ? Math.max(0, Math.trunc(roomCursorHint) - 1)
-      : 0;
-    const next = Math.max(current, hint) + 1;
-    issueCursorByRoom.set(room, next);
-    return next;
-  }
-
-  async function persistIssueProjectionToCache(
-    envelope: Envelope,
-    roomCursorHint?: number,
-  ): Promise<void> {
-    if (!cacheStore) return;
-    const issueId = extractIssueIdFromEnvelope(envelope);
-    const issueCursor = await nextIssueCursor(envelope.room, roomCursorHint);
-    const updatedAt = nowEpochSec();
-    const action = deriveIssueAction(envelope);
-    const sourceUpdatedAtMs = parseIssueSourceUpdatedAtMs(envelope.payload);
-
-    const issueEvent: IssueCacheEventRecord = {
-      version: 1,
-      kind: 'issue_event',
-      room: envelope.room,
-      cursor: issueCursor,
-      issue_id: issueId,
-      action,
-      envelope,
-      source_updated_at_ms: sourceUpdatedAtMs,
-      updated_at: updatedAt,
-    };
-    await putCacheJsonObject({
-      kind: 'object',
-      key: issueEventStorageKey(envelope.room, issueCursor, envelope.id),
-      room: envelope.room,
-      ref: `issue_event:${issueId}`,
-      value: issueEvent,
-      updatedAt,
-    });
-
-    let shouldUpdateSnapshot = true;
-    try {
-      const existing = await cacheStore.get(
-        'object',
-        issueSnapshotStorageKey(envelope.room, issueId),
-      );
-      if (existing) {
-        const parsed = parseIssueCacheSnapshotRecord(existing, issueProjectionValidators);
-        if (
-          parsed &&
-          parsed.source_updated_at_ms !== null &&
-          sourceUpdatedAtMs !== null &&
-          sourceUpdatedAtMs < parsed.source_updated_at_ms
-        ) {
-          shouldUpdateSnapshot = false;
-        }
-      }
-    } catch {
-      shouldUpdateSnapshot = true;
-    }
-
-    if (shouldUpdateSnapshot) {
-      const issueSnapshot: IssueCacheSnapshotRecord = {
-        version: 1,
-        kind: 'issue_snapshot',
-        room: envelope.room,
-        issue_id: issueId,
-        last_cursor: issueCursor,
-        envelope,
-        source_updated_at_ms: sourceUpdatedAtMs,
-        updated_at: updatedAt,
-      };
-      await putCacheJsonObject({
-        kind: 'object',
-        key: issueSnapshotStorageKey(envelope.room, issueId),
-        room: envelope.room,
-        ref: 'issue_snapshot',
-        value: issueSnapshot,
-        updatedAt,
-      });
-    }
-
-    const issueCursorRecord: IssueCacheCursorRecord = {
-      version: 1,
-      kind: 'issue_cursor',
-      room: envelope.room,
-      cursor: issueCursor,
-      updated_at: updatedAt,
-    };
-    await putCacheJsonObject({
-      kind: 'object',
-      key: issueCursorStorageKey(envelope.room),
-      room: envelope.room,
-      ref: 'issue_cursor',
-      value: issueCursorRecord,
-      updatedAt,
-    });
-  }
-
   async function persistEnvelopeToCache(
     envelope: Envelope,
     roomCursorHint?: number,
   ): Promise<void> {
-    if (!cachePersistenceQueue) return;
-    try {
-      await cachePersistenceQueue.enqueue(async () => {
-        const kind = isIssueTopic(envelope.topic) ? 'issue' : 'object';
-        const key = `${envelope.room}/${envelope.id}`;
-        const updatedAt = nowEpochSec();
-        await putCacheJsonObject({
-          kind,
-          key,
-          room: envelope.room,
-          ref: envelope.topic,
-          value: envelope,
-          updatedAt,
-        });
-        if (kind === 'issue') {
-          await persistIssueProjectionToCache(envelope, roomCursorHint);
-        }
-      });
-    } catch {
-      // Cache failures should not affect relay publish availability.
-    }
+    await cacheAdapter.persistEnvelope(envelope, roomCursorHint);
   }
 
   function reapDeadConnections(): void {
@@ -1697,98 +1493,6 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
     );
   }
 
-  async function loadIssueEventsFromCache(
-    room: string,
-    after: number,
-    limit: number,
-  ): Promise<{ events: IssueCacheEventRecord[]; nextCursor: number }> {
-    if (!cacheStore) {
-      return { events: [], nextCursor: after };
-    }
-    const prefix = `issue/events/${room}/`;
-    const pageSize = Math.max(100, limit * 2);
-    let listCursor: string | undefined;
-    const events: IssueCacheEventRecord[] = [];
-
-    while (events.length < limit) {
-      const listed = await cacheStore.list({
-        kind: 'object',
-        room,
-        prefix,
-        limit: pageSize,
-        ...(listCursor ? { cursor: listCursor } : {}),
-      });
-      for (const entry of listed.entries) {
-        const keyCursor = parseIssueEventCursorFromKey(room, entry.key);
-        if (!keyCursor || keyCursor <= after) continue;
-        let cached: CacheStoreObject | null;
-        try {
-          cached = await cacheStore.get('object', entry.key);
-        } catch {
-          continue;
-        }
-        if (!cached) continue;
-        const record = parseIssueCacheEventRecord(cached, issueProjectionValidators);
-        if (!record) continue;
-        if (record.room !== room || record.cursor <= after) continue;
-        events.push(record);
-        if (events.length >= limit) break;
-      }
-
-      if (events.length >= limit || listed.cursor === null) {
-        break;
-      }
-      listCursor = listed.cursor;
-    }
-
-    events.sort((a, b) => a.cursor - b.cursor);
-    const nextCursor = events.length > 0 ? events[events.length - 1].cursor : after;
-    return { events, nextCursor };
-  }
-
-  async function loadIssueSnapshotsFromCache(
-    room: string,
-    limit: number,
-  ): Promise<IssueCacheSnapshotRecord[]> {
-    if (!cacheStore) return [];
-    const prefix = `issue/snapshots/${room}/`;
-    const pageSize = Math.max(100, limit);
-    let listCursor: string | undefined;
-    const snapshots: IssueCacheSnapshotRecord[] = [];
-
-    while (snapshots.length < limit) {
-      const listed = await cacheStore.list({
-        kind: 'object',
-        room,
-        prefix,
-        limit: pageSize,
-        ...(listCursor ? { cursor: listCursor } : {}),
-      });
-      for (const entry of listed.entries) {
-        let cached: CacheStoreObject | null;
-        try {
-          cached = await cacheStore.get('object', entry.key);
-        } catch {
-          continue;
-        }
-        if (!cached) continue;
-        const record = parseIssueCacheSnapshotRecord(cached, issueProjectionValidators);
-        if (!record) continue;
-        if (record.room !== room) continue;
-        snapshots.push(record);
-        if (snapshots.length >= limit) break;
-      }
-
-      if (snapshots.length >= limit || listed.cursor === null) {
-        break;
-      }
-      listCursor = listed.cursor;
-    }
-
-    snapshots.sort((a, b) => a.issue_id.localeCompare(b.issue_id));
-    return snapshots;
-  }
-
   async function handleCacheIssueSync(request: Request, url: URL): Promise<Response> {
     if (request.method !== 'GET') {
       return methodNotAllowedResponse();
@@ -1803,52 +1507,28 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
     const after = normalizeAfter(url.searchParams.get('after'), 0);
     const limit = normalizeLimit(url.searchParams.get('limit'), 100);
     const snapshotLimit = normalizeLimit(url.searchParams.get('snapshot_limit'), 100);
-    if (!cacheStore) {
-      return Response.json({
-        ok: true,
-        room,
-        next_cursor: after,
-        room_cursor: after,
-        events: [],
-        snapshots: [],
-      }, { status: 200 });
-    }
-
-    try {
-      const eventsResult = await loadIssueEventsFromCache(room, after, limit);
-      const snapshots = await loadIssueSnapshotsFromCache(room, snapshotLimit);
-      const roomCursor = await currentIssueCursor(room);
-      return Response.json({
-        ok: true,
-        room,
-        next_cursor: eventsResult.nextCursor,
-        room_cursor: roomCursor,
-        events: eventsResult.events.map((record) => ({
-          cursor: record.cursor,
-          issue_id: record.issue_id,
-          action: record.action,
-          source_updated_at_ms: record.source_updated_at_ms,
-          updated_at: record.updated_at,
-          envelope: sanitizeEnvelope(record.envelope),
-        })),
-        snapshots: snapshots.map((record) => ({
-          issue_id: record.issue_id,
-          last_cursor: record.last_cursor,
-          source_updated_at_ms: record.source_updated_at_ms,
-          updated_at: record.updated_at,
-          envelope: sanitizeEnvelope(record.envelope),
-        })),
-      }, { status: 200 });
-    } catch {
-      return Response.json({
-        ok: true,
-        room,
-        next_cursor: after,
-        room_cursor: after,
-        events: [],
-        snapshots: [],
-      }, { status: 200 });
-    }
+    const result = await cacheAdapter.syncIssues(room, after, limit, snapshotLimit);
+    return Response.json({
+      ok: true,
+      room,
+      next_cursor: result.nextCursor,
+      room_cursor: result.roomCursor,
+      events: result.events.map((record) => ({
+        cursor: record.cursor,
+        issue_id: record.issue_id,
+        action: record.action,
+        source_updated_at_ms: record.source_updated_at_ms,
+        updated_at: record.updated_at,
+        envelope: sanitizeEnvelope(record.envelope),
+      })),
+      snapshots: result.snapshots.map((record) => ({
+        issue_id: record.issue_id,
+        last_cursor: record.last_cursor,
+        source_updated_at_ms: record.source_updated_at_ms,
+        updated_at: record.updated_at,
+        envelope: sanitizeEnvelope(record.envelope),
+      })),
+    }, { status: 200 });
   }
 
   async function handleCacheIssuePull(request: Request, url: URL): Promise<Response> {
@@ -1864,56 +1544,12 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
 
     const after = normalizeAfter(url.searchParams.get('after'), 0);
     const limit = normalizeLimit(url.searchParams.get('limit'), 100);
-    if (!cacheStore) {
-      return Response.json({
-        ok: true,
-        room,
-        next_cursor: after,
-        envelopes: [],
-      }, { status: 200 });
-    }
-
-    let listed: CacheStoreListResult;
-    try {
-      listed = await cacheStore.list({
-        kind: 'issue',
-        room,
-        limit,
-        cursor: String(after),
-      });
-    } catch {
-      return Response.json({
-        ok: true,
-        room,
-        next_cursor: after,
-        envelopes: [],
-      }, { status: 200 });
-    }
-
-    const envelopes: JsonObject[] = [];
-    for (const entry of listed.entries) {
-      let cached;
-      try {
-        cached = await cacheStore.get('issue', entry.key);
-      } catch {
-        continue;
-      }
-      if (!cached) continue;
-      const envelope = parseCachedIssueEnvelope(cached, issueProjectionValidators);
-      if (!envelope) continue;
-      if (envelope.room !== room) continue;
-      if (!isIssueTopic(envelope.topic)) continue;
-      envelopes.push(sanitizeEnvelope(envelope));
-    }
-
-    const nextCursor = listed.cursor === null
-      ? after + listed.entries.length
-      : Number.parseInt(listed.cursor, 10);
+    const result = await cacheAdapter.pullIssues(room, after, limit);
     return Response.json({
       ok: true,
       room,
-      next_cursor: Number.isFinite(nextCursor) ? nextCursor : after + listed.entries.length,
-      envelopes,
+      next_cursor: result.nextCursor,
+      envelopes: result.envelopes.map((envelope) => sanitizeEnvelope(envelope as Envelope)),
     }, { status: 200 });
   }
 
@@ -3116,13 +2752,7 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
       })),
     };
 
-    const issueCursorSnapshot: Record<string, number> = {};
-    for (const [room, cursor] of issueCursorByRoom.entries()) {
-      if (!isValidRoomName(room)) continue;
-      if (!Number.isFinite(cursor)) continue;
-      const normalized = Math.max(0, Math.trunc(cursor));
-      issueCursorSnapshot[room] = normalized;
-    }
+    const issueCursorSnapshot = cacheAdapter.snapshotIssueCursors();
 
     const githubWebhookSnapshot = githubIssueSync.snapshot();
 
@@ -3232,7 +2862,7 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
     rooms.clear();
     keyRegistry.clear();
     noncesBySender.clear();
-    issueCursorByRoom.clear();
+    cacheAdapter.restoreIssueCursors(null);
     githubIssueSync.restore({ deliveries: {}, dlq: [] });
     cacheExchangeRecords.splice(0, cacheExchangeRecords.length);
     cacheExchangeCursor = 0;
@@ -3379,13 +3009,9 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
       }
     }
 
-    if (isObjectRecord(snapshotData.issue_cursors)) {
-      for (const [room, cursorRaw] of Object.entries(snapshotData.issue_cursors)) {
-        if (!isValidRoomName(room)) continue;
-        if (typeof cursorRaw !== 'number' || !Number.isFinite(cursorRaw)) continue;
-        issueCursorByRoom.set(room, Math.max(0, Math.trunc(cursorRaw)));
-      }
-    }
+    cacheAdapter.restoreIssueCursors(
+      isObjectRecord(snapshotData.issue_cursors) ? snapshotData.issue_cursors : null,
+    );
 
     if (isObjectRecord(snapshotData.github_webhook)) {
       githubIssueSync.restore(snapshotData.github_webhook);

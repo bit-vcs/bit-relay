@@ -40,7 +40,7 @@
 - [x] 探索: 既存 `memory_handler.ts` / `git_serve_session.ts` の責務を分離する差分設計を書く
 - [x] Red: 契約テスト（型 + runtime validation）を先に追加
 - [x] Green: 契約を満たす最小実装
-- [ ] Refactor: handler 層と adapter 層に分離
+- [x] Refactor: handler 層と adapter 層に分離
 
 ### 完了条件
 
