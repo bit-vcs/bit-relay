@@ -2,7 +2,26 @@ default:
   just test
 
 test:
-  deno task test
+  echo "==> contract"
+  just test-contract
+  echo "==> unit"
+  just test-unit
+  echo "==> integration"
+  just test-integration
+  echo "==> e2e"
+  just test-e2e
+
+test-contract:
+  deno task test:contract
+
+test-unit:
+  deno task test:unit
+
+test-integration:
+  deno task test:integration
+
+test-e2e:
+  deno task test:e2e
 
 dev:
   deno task dev
