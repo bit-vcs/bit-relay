@@ -177,6 +177,10 @@ optional env:
 - `RELAY_PEERS_JSON` (JSON: peer relay URLs, `RELAY_PEERS` より優先)
 - `RELAY_PEER_AUTH_TOKEN` (peer pull 時の Bearer token)
 - `RELAY_PEER_SYNC_INTERVAL_SEC` (default: `30`)
+- `RELAY_PEER_REPO_FF_COMMIT_WINDOW` (default: `30`, peer 間 repo 判定で見る commit 数)
+- `RELAY_REPO_ID` (明示 repo ID, 例: `bit-vcs/bit`)
+- `RELAY_REPO_ORIGIN_URL` (origin URL の明示上書き)
+- `RELAY_REPO_RECENT_COMMITS` (CSV: 最近 commit hash)
 - `RELAY_CACHE_PROVIDER` (`memory` or `r2`, default: `memory`)
 - `RELAY_CACHE_TTL_SEC` (default: `86400`)
 - `RELAY_CACHE_MAX_BYTES` (任意、上限 bytes)
@@ -188,6 +192,9 @@ optional env:
 - `RELAY_TRIGGER_EVENT_TYPE` (default: `relay.incoming_ref`)
 - `RELAY_TRIGGER_REF_PREFIXES` (CSV, default: `refs/relay/incoming/`)
 - `RELAY_CONFIG_JSON` (JSON override)
+
+`RELAY_REPO_ID` を指定しない場合は `git remote.origin.url` と直近 commit を参照して、 peer cache
+sync の対象 repo を自動推定します（`deno task dev` は `git` 実行権限付き）。
 
 互換モード（従来の unsigned publish 許可）:
 

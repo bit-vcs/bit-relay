@@ -18,6 +18,7 @@ export const TEST_HIERARCHY: Readonly<Record<TestLayer, ReadonlyArray<string>>> 
     'tests/relay_cache_adapter_test.ts',
     'tests/relay_observability_test.ts',
     'tests/runtime_config_test.ts',
+    'tests/repository_affinity_test.ts',
     'tests/trigger_dispatcher_test.ts',
   ],
   integration: [
@@ -56,4 +57,3 @@ export function getAllLayerTests(): string[] {
   const merged = Object.values(TEST_HIERARCHY).flatMap((entries) => entries);
   return [...new Set(merged)].sort((a, b) => a.localeCompare(b));
 }
-

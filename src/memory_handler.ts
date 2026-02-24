@@ -197,6 +197,10 @@ export interface MemoryRelayOptions {
   wsIdleTimeoutMs?: number;
   relayNodeId?: string;
   peerRelayUrls?: string[];
+  repositoryId?: string;
+  repositoryOwner?: string;
+  repositoryName?: string;
+  repositoryRecentCommits?: string[];
   cacheExchangeMaxHops?: number;
   cacheExchangeMaxRecords?: number;
   cacheStore?: CacheStore;
@@ -238,6 +242,7 @@ const MAX_GITHUB_WEBHOOK_DLQ_ENTRIES = 10_000;
 const GITHUB_WEBHOOK_RETRY_BASE_SEC = 30;
 const INCOMING_TRIGGER_REF_PREFIX = 'refs/relay/incoming/';
 const ROOM_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const COMMIT_HASH_PATTERN = /^[0-9a-f]{7,40}$/i;
 const TOPIC_PATTERN = /^[a-z][a-z0-9._-]{0,63}$/;
 const PR_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const NODE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
@@ -328,6 +333,66 @@ function normalizePeerRelayUrls(raw: string[] | undefined): string[] {
     dedupe.add(trimmed);
   }
   return [...dedupe];
+}
+
+interface NormalizedRepositoryMetadata {
+  repoId: string | null;
+  owner: string | null;
+  name: string | null;
+  recentCommits: string[];
+}
+
+function normalizeRepositoryToken(raw: string | undefined): string | null {
+  const value = (raw ?? '').trim().toLowerCase();
+  if (value.length === 0) return null;
+  if (!/^[a-z0-9._-]+$/.test(value)) return null;
+  return value;
+}
+
+function normalizeRepositoryCommits(raw: string[] | undefined): string[] {
+  if (!Array.isArray(raw)) return [];
+  const dedupe = new Set<string>();
+  for (const value of raw) {
+    if (typeof value !== 'string') continue;
+    const normalized = value.trim().toLowerCase();
+    if (!COMMIT_HASH_PATTERN.test(normalized)) continue;
+    dedupe.add(normalized);
+    if (dedupe.size >= 30) break;
+  }
+  return [...dedupe];
+}
+
+function parseOwnerNameFromRepositoryId(
+  repoId: string,
+): { owner: string | null; name: string | null } {
+  const trimmed = repoId.trim().replace(/^github:/i, '');
+  const cleaned = trimmed.endsWith('.git') ? trimmed.slice(0, -4) : trimmed;
+  const segments = cleaned.split('/').map((entry) => entry.trim()).filter((entry) =>
+    entry.length > 0
+  );
+  if (segments.length === 0) {
+    return { owner: null, name: null };
+  }
+  const name = normalizeRepositoryToken(segments[segments.length - 1]) ?? null;
+  const owner = segments.length >= 2
+    ? normalizeRepositoryToken(segments[segments.length - 2])
+    : null;
+  return { owner, name };
+}
+
+function normalizeRepositoryMetadata(options: MemoryRelayOptions): NormalizedRepositoryMetadata {
+  const repoIdRaw = (options.repositoryId ?? '').trim();
+  const repoId = repoIdRaw.length > 0 ? repoIdRaw.replace(/^github:/i, '').toLowerCase() : null;
+  const fromRepoId = repoId ? parseOwnerNameFromRepositoryId(repoId) : { owner: null, name: null };
+  const owner = normalizeRepositoryToken(options.repositoryOwner) ?? fromRepoId.owner;
+  const name = normalizeRepositoryToken(options.repositoryName) ?? fromRepoId.name;
+  const recentCommits = normalizeRepositoryCommits(options.repositoryRecentCommits);
+  return {
+    repoId,
+    owner,
+    name,
+    recentCommits,
+  };
 }
 
 function isValidRoomName(room: string): boolean {
@@ -1088,6 +1153,7 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
   );
   const relayNodeId = normalizeRelayNodeId(options.relayNodeId);
   const peerRelayUrls = normalizePeerRelayUrls(options.peerRelayUrls);
+  const repositoryMetadata = normalizeRepositoryMetadata(options);
   const cacheExchangeMaxHops = Math.max(
     1,
     Math.trunc(options.cacheExchangeMaxHops ?? DEFAULT_CACHE_EXCHANGE_MAX_HOPS),
@@ -1330,6 +1396,12 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
       node_id: relayNodeId,
       peers: peerRelayUrls,
       max_hops: cacheExchangeMaxHops,
+      repository: {
+        repo_id: repositoryMetadata.repoId,
+        owner: repositoryMetadata.owner,
+        name: repositoryMetadata.name,
+        recent_commits: repositoryMetadata.recentCommits,
+      },
     }, { status: 200 });
   }
 

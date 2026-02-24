@@ -16,6 +16,12 @@ import {
   safeWriteGitCache,
 } from './git_cache_layer.ts';
 import { createWebhookTriggerDispatcher } from './trigger_dispatcher.ts';
+import {
+  decideRepositoryCompatibility,
+  parseRepositoryFromDiscoveryBody,
+  type RelayRepositoryIdentity,
+  resolveLocalRepositoryIdentity,
+} from './repository_affinity.ts';
 
 function parsePositiveInt(raw: string | undefined, fallback: number): number {
   const value = Number.parseInt(raw ?? '', 10);
@@ -23,6 +29,17 @@ function parsePositiveInt(raw: string | undefined, fallback: number): number {
     return fallback;
   }
   return Math.trunc(value);
+}
+
+function parseCsvList(raw: string | undefined): string[] {
+  if (typeof raw !== 'string' || raw.trim().length === 0) return [];
+  const dedupe = new Set<string>();
+  for (const part of raw.split(',')) {
+    const value = part.trim();
+    if (value.length === 0) continue;
+    dedupe.add(value);
+  }
+  return [...dedupe];
 }
 
 const SESSION_ID_PATTERN = /^[A-Za-z0-9]{6,16}$/;
@@ -46,6 +63,16 @@ function generateSessionId(): string {
 const host = Deno.env.get('HOST') ?? '127.0.0.1';
 const port = parsePositiveInt(Deno.env.get('PORT') ?? undefined, 8788);
 const runtimeConfig = parseRelayRuntimeConfigFromEnv((key) => Deno.env.get(key) ?? undefined);
+const repoFfCommitWindow = parsePositiveInt(
+  Deno.env.get('RELAY_PEER_REPO_FF_COMMIT_WINDOW') ?? undefined,
+  30,
+);
+const localRepositoryIdentity = await resolveLocalRepositoryIdentity({
+  explicitRepoId: Deno.env.get('RELAY_REPO_ID') ?? undefined,
+  explicitOriginUrl: Deno.env.get('RELAY_REPO_ORIGIN_URL') ?? undefined,
+  explicitRecentCommits: parseCsvList(Deno.env.get('RELAY_REPO_RECENT_COMMITS') ?? undefined),
+  commitWindow: repoFfCommitWindow,
+});
 const relayCacheStore = createMemoryCacheStore({
   ttlSec: runtimeConfig.cache.ttlSec,
   maxBytes: runtimeConfig.cache.maxBytes,
@@ -55,6 +82,10 @@ const service = createMemoryRelayService({
   peerRelayUrls: runtimeConfig.peers.urls.length > 0
     ? runtimeConfig.peers.urls
     : runtimeConfig.relay.peerRelayUrls,
+  repositoryId: localRepositoryIdentity.repoId ?? undefined,
+  repositoryOwner: localRepositoryIdentity.owner ?? undefined,
+  repositoryName: localRepositoryIdentity.name ?? undefined,
+  repositoryRecentCommits: localRepositoryIdentity.recentCommits,
   cacheStore: relayCacheStore,
   githubWebhookSecret: runtimeConfig.github.webhookSecret ?? undefined,
 });
@@ -117,6 +148,11 @@ function parseCacheExchangePullBody(body: Record<string, unknown>): {
   return { entries, nextCursor };
 }
 
+function parsePeerNodeIdFromDiscoveryBody(body: Record<string, unknown>): string | null {
+  const raw = typeof body.node_id === 'string' ? body.node_id.trim() : '';
+  return raw.length > 0 ? raw : null;
+}
+
 function nowEpochSec(): number {
   return Math.floor(Date.now() / 1000);
 }
@@ -173,10 +209,84 @@ async function startCacheSyncWorker(): Promise<void> {
     return;
   }
 
+  const repositoryScopedSyncEnabled = localRepositoryIdentity.name !== null;
+  if (!repositoryScopedSyncEnabled) {
+    console.warn(
+      '[bit-relay] repository affinity disabled: set RELAY_REPO_ID or enable git origin detection',
+    );
+  }
+
+  const discoveryCacheTtlMs = Math.max(5, runtimeConfig.peers.syncIntervalSec) * 1000;
+  const loggedRepositoryMismatchPeers = new Set<string>();
+  const peerDiscoveryCache = new Map<
+    string,
+    { expiresAt: number; nodeId: string | null; repository: RelayRepositoryIdentity | null }
+  >();
+
+  async function fetchPeerDiscovery(
+    peer: string,
+  ): Promise<{ nodeId: string | null; repository: RelayRepositoryIdentity | null }> {
+    const url = new URL('/api/v1/cache/exchange/discovery', peer);
+    const headers = new Headers();
+    if (peerSyncAuthToken.length > 0) {
+      headers.set('authorization', `Bearer ${peerSyncAuthToken}`);
+    }
+    const response = await fetch(url.toString(), {
+      method: 'GET',
+      headers,
+    });
+    if (response.status !== 200) {
+      const text = await response.text();
+      throw new Error(
+        `peer discovery failed: peer=${peer}, status=${response.status}, body=${text}`,
+      );
+    }
+    const body = await response.json() as Record<string, unknown>;
+    return {
+      nodeId: parsePeerNodeIdFromDiscoveryBody(body),
+      repository: parseRepositoryFromDiscoveryBody(body, repoFfCommitWindow),
+    };
+  }
+
+  async function resolvePeerDiscovery(
+    peer: string,
+  ): Promise<{ nodeId: string | null; repository: RelayRepositoryIdentity | null }> {
+    const cached = peerDiscoveryCache.get(peer);
+    if (cached && Date.now() < cached.expiresAt) {
+      return { nodeId: cached.nodeId, repository: cached.repository };
+    }
+    const discovered = await fetchPeerDiscovery(peer);
+    peerDiscoveryCache.set(peer, {
+      expiresAt: Date.now() + discoveryCacheTtlMs,
+      nodeId: discovered.nodeId,
+      repository: discovered.repository,
+    });
+    return discovered;
+  }
+
   const worker = createCacheSyncWorker({
     peers,
     limit: 200,
     async pullFromPeer({ peer, after, limit }) {
+      if (repositoryScopedSyncEnabled) {
+        const peerDiscovery = await resolvePeerDiscovery(peer);
+        const decision = decideRepositoryCompatibility(
+          localRepositoryIdentity,
+          peerDiscovery.repository,
+        );
+        if (!decision.compatible) {
+          if (!loggedRepositoryMismatchPeers.has(peer)) {
+            const peerNode = peerDiscovery.nodeId ?? peer;
+            console.warn(
+              `[bit-relay] cache-sync skipped peer=${peerNode} reason=${decision.reason}`,
+            );
+            loggedRepositoryMismatchPeers.add(peer);
+          }
+          return { entries: [], nextCursor: after };
+        }
+        loggedRepositoryMismatchPeers.delete(peer);
+      }
+
       const url = new URL('/api/v1/cache/exchange/pull', peer);
       url.searchParams.set('after', String(after));
       url.searchParams.set('limit', String(limit));

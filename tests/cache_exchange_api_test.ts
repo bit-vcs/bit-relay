@@ -48,6 +48,10 @@ Deno.test('cache exchange discovery returns node id and static peers', async () 
     requireSignatures: false,
     relayNodeId: 'relay-a',
     peerRelayUrls: ['https://relay-b.example', 'https://relay-c.example'],
+    repositoryId: 'bit-vcs/bit',
+    repositoryOwner: 'bit-vcs',
+    repositoryName: 'bit',
+    repositoryRecentCommits: ['a1a1a1a', 'b2b2b2b'],
   } as any);
 
   try {
@@ -61,6 +65,12 @@ Deno.test('cache exchange discovery returns node id and static peers', async () 
       protocol: 'cache.exchange.v1',
       node_id: 'relay-a',
       peers: ['https://relay-b.example', 'https://relay-c.example'],
+      repository: {
+        repo_id: 'bit-vcs/bit',
+        owner: 'bit-vcs',
+        name: 'bit',
+        recent_commits: ['a1a1a1a', 'b2b2b2b'],
+      },
     });
   } finally {
     service.close();

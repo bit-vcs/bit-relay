@@ -119,6 +119,12 @@ class FakeR2Bucket implements R2BucketLike {
       ...(truncated ? { cursor: String(next) } : {}),
     };
   }
+
+  listKeys(prefix = ''): string[] {
+    return [...this.objects.keys()]
+      .filter((key) => key.startsWith(prefix))
+      .sort((a, b) => a.localeCompare(b));
+  }
 }
 
 function createRelayHarness(options: { cacheStore?: CacheStore } = {}): RelayHarness {
@@ -443,6 +449,119 @@ Deno.test(
     }
   },
 );
+
+Deno.test('e2e git cache fallback: shared r2 cache survives relay node shutdown', async () => {
+  const bucket = new FakeR2Bucket();
+  const relayA = createRelayHarness({
+    cacheStore: createR2CacheStore({ bucket, prefix: 'relay-cache/' }),
+  });
+  const relayB = createRelayHarness({
+    cacheStore: createR2CacheStore({ bucket, prefix: 'relay-cache/' }),
+  });
+  let relayAShutdown = false;
+  try {
+    const node = await registerNode(relayA.baseUrl);
+
+    const refsUrlA =
+      `${relayA.baseUrl}/git/${node.sessionId}/info/refs?service=git-upload-pack&session_token=${node.sessionToken}`;
+    const refsUrlB =
+      `${relayB.baseUrl}/git/${node.sessionId}/info/refs?service=git-upload-pack&session_token=${node.sessionToken}`;
+    const packUrlA =
+      `${relayA.baseUrl}/git/${node.sessionId}/git-upload-pack?session_token=${node.sessionToken}`;
+    const packUrlB =
+      `${relayB.baseUrl}/git/${node.sessionId}/git-upload-pack?session_token=${node.sessionToken}`;
+
+    const refsPromise = fetch(refsUrlA);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const refsPollRes = await fetch(
+      `${relayA.baseUrl}/api/v1/serve/poll?session=${node.sessionId}&timeout=2&session_token=${node.sessionToken}`,
+    );
+    const refsPollBody = await refsPollRes.json() as { requests: Array<{ request_id: string }> };
+    assert(refsPollBody.requests.length > 0);
+
+    const refsRespondRes = await fetch(
+      `${relayA.baseUrl}/api/v1/serve/respond?session=${node.sessionId}&session_token=${node.sessionToken}`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          request_id: refsPollBody.requests[0].request_id,
+          status: 200,
+          headers: { 'content-type': 'application/x-git-upload-pack-advertisement' },
+          body_base64: btoa('refs-failover'),
+        }),
+      },
+    );
+    assertEquals(refsRespondRes.status, 200);
+    await refsRespondRes.json();
+
+    const refsLive = await refsPromise;
+    assertEquals(refsLive.status, 200);
+    assertEquals(await refsLive.text(), 'refs-failover');
+    assertEquals(refsLive.headers.get(CACHE_HIT_HEADER), null);
+
+    const packRequestBody = 'want-commit-main';
+    const packPromise = fetch(packUrlA, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-git-upload-pack-request' },
+      body: packRequestBody,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const packPollRes = await fetch(
+      `${relayA.baseUrl}/api/v1/serve/poll?session=${node.sessionId}&timeout=2&session_token=${node.sessionToken}`,
+    );
+    const packPollBody = await packPollRes.json() as { requests: Array<{ request_id: string }> };
+    assert(packPollBody.requests.length > 0);
+
+    const packRespondRes = await fetch(
+      `${relayA.baseUrl}/api/v1/serve/respond?session=${node.sessionId}&session_token=${node.sessionToken}`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          request_id: packPollBody.requests[0].request_id,
+          status: 200,
+          headers: { 'content-type': 'application/x-git-upload-pack-result' },
+          body_base64: btoa('PACK-FAILOVER'),
+        }),
+      },
+    );
+    assertEquals(packRespondRes.status, 200);
+    await packRespondRes.json();
+
+    const packLive = await packPromise;
+    assertEquals(packLive.status, 200);
+    assertEquals(await packLive.text(), 'PACK-FAILOVER');
+    assertEquals(packLive.headers.get(CACHE_HIT_HEADER), null);
+
+    const cacheKeys = bucket.listKeys('relay-cache/');
+    assert(cacheKeys.some((key) => key.includes('/ref/')));
+    assert(cacheKeys.some((key) => key.includes('/pack/')));
+
+    await relayA.shutdown();
+    relayAShutdown = true;
+
+    const refsCached = await fetch(refsUrlB);
+    assertEquals(refsCached.status, 200);
+    assertEquals(await refsCached.text(), 'refs-failover');
+    assertEquals(refsCached.headers.get(CACHE_HIT_HEADER), '1');
+
+    const packCached = await fetch(packUrlB, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-git-upload-pack-request' },
+      body: packRequestBody,
+    });
+    assertEquals(packCached.status, 200);
+    assertEquals(await packCached.text(), 'PACK-FAILOVER');
+    assertEquals(packCached.headers.get(CACHE_HIT_HEADER), '1');
+  } finally {
+    if (!relayAShutdown) {
+      await relayA.shutdown();
+    }
+    await relayB.shutdown();
+  }
+});
 
 Deno.test('e2e git cache fallback: POST cache key is request-body sensitive', async () => {
   const relay = createRelayHarness();
