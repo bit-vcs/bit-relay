@@ -6,7 +6,11 @@ import { createAdminGitHubApi } from './admin_github_api.ts';
 import { createCacheSyncWorker } from './cache_sync_worker.ts';
 import type { CacheExchangeEntry } from './cache_exchange.ts';
 import { createMemoryCacheStore } from './cache_store.ts';
-import { buildGitCacheKeyFromRequest, readGitCache, writeGitCache } from './git_cache_layer.ts';
+import {
+  buildGitCacheKeyFromRequest,
+  safeReadGitCache,
+  safeWriteGitCache,
+} from './git_cache_layer.ts';
 
 function parsePositiveInt(raw: string | undefined, fallback: number): number {
   const value = Number.parseInt(raw ?? '', 10);
@@ -236,7 +240,11 @@ async function handleGitRelayRequest(args: {
 }): Promise<Response> {
   const { request, sessionId, gitSubPath } = args;
   const cacheKey = await buildGitCacheKeyFromRequest(request.clone(), sessionId, `/${gitSubPath}`);
-  const cached = await readGitCache(gitCacheStore, cacheKey);
+  const cached = await safeReadGitCache(gitCacheStore, cacheKey, {
+    onError(error) {
+      console.warn('[bit-relay] git cache read failed; degraded mode', error);
+    },
+  });
   const session = gitServeSessions.get(sessionId);
   if (!session) {
     if (cached) return cached;
@@ -249,7 +257,11 @@ async function handleGitRelayRequest(args: {
   const response = await session.fetch(sessionRequest);
 
   if (response.status === 200) {
-    await writeGitCache(gitCacheStore, cacheKey, response);
+    await safeWriteGitCache(gitCacheStore, cacheKey, response, {
+      onError(error) {
+        console.warn('[bit-relay] git cache write failed; degraded mode', error);
+      },
+    });
     return response;
   }
 

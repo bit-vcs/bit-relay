@@ -1,12 +1,12 @@
 import { assert, assertEquals, assertObjectMatch } from '@std/assert';
 import { createMemoryRelayService } from '../src/memory_handler.ts';
 import { createGitServeSession } from '../src/git_serve_session.ts';
-import { createMemoryCacheStore } from '../src/cache_store.ts';
+import { type CacheStore, createMemoryCacheStore } from '../src/cache_store.ts';
 import {
   buildGitCacheKeyFromRequest,
   CACHE_HIT_HEADER,
-  readGitCache,
-  writeGitCache,
+  safeReadGitCache,
+  safeWriteGitCache,
 } from '../src/git_cache_layer.ts';
 
 interface RelayHarness {
@@ -16,10 +16,10 @@ interface RelayHarness {
   shutdown(): Promise<void>;
 }
 
-function createRelayHarness(): RelayHarness {
+function createRelayHarness(options: { cacheStore?: CacheStore } = {}): RelayHarness {
   const service = createMemoryRelayService({ requireSignatures: false });
   const sessions = new Map<string, ReturnType<typeof createGitServeSession>>();
-  const cacheStore = createMemoryCacheStore();
+  const cacheStore = options.cacheStore ?? createMemoryCacheStore();
   const cleanupFns: Array<() => void> = [];
 
   function generateSessionId(): string {
@@ -43,7 +43,7 @@ function createRelayHarness(): RelayHarness {
       sessionId,
       `/${gitSubPath}`,
     );
-    const cached = await readGitCache(cacheStore, cacheKey);
+    const cached = await safeReadGitCache(cacheStore, cacheKey);
     const session = sessions.get(sessionId);
     if (!session) {
       if (cached) return cached;
@@ -55,7 +55,7 @@ function createRelayHarness(): RelayHarness {
     const sessionRequest = new Request(sessionUrl.toString(), request);
     const response = await session.fetch(sessionRequest);
     if (response.status === 200) {
-      await writeGitCache(cacheStore, cacheKey, response);
+      await safeWriteGitCache(cacheStore, cacheKey, response);
       return response;
     }
     if (cached && (response.status === 404 || response.status === 410)) {
@@ -153,6 +153,73 @@ async function registerNode(
     sessionToken: body.session_token,
   };
 }
+
+function createAlwaysFailingCacheStore(): CacheStore {
+  return {
+    async put(): Promise<void> {
+      throw new Error('cache put failed');
+    },
+    async get(): Promise<null> {
+      throw new Error('cache get failed');
+    },
+    async delete(): Promise<boolean> {
+      throw new Error('cache delete failed');
+    },
+    async list() {
+      throw new Error('cache list failed');
+    },
+  };
+}
+
+Deno.test('e2e git cache degraded mode: cache backend failures do not block live git relay', async () => {
+  const relay = createRelayHarness({ cacheStore: createAlwaysFailingCacheStore() });
+  try {
+    const node = await registerNode(relay.baseUrl);
+
+    const firstPromise = fetch(
+      `${relay.baseUrl}/git/${node.sessionId}/info/refs?service=git-upload-pack&session_token=${node.sessionToken}`,
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const pollRes = await fetch(
+      `${relay.baseUrl}/api/v1/serve/poll?session=${node.sessionId}&timeout=2&session_token=${node.sessionToken}`,
+    );
+    const pollBody = await pollRes.json() as { requests: Array<{ request_id: string }> };
+    assert(pollBody.requests.length > 0);
+
+    const respondRes = await fetch(
+      `${relay.baseUrl}/api/v1/serve/respond?session=${node.sessionId}&session_token=${node.sessionToken}`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          request_id: pollBody.requests[0].request_id,
+          status: 200,
+          headers: { 'content-type': 'application/x-git-upload-pack-advertisement' },
+          body_base64: btoa('refs-live'),
+        }),
+      },
+    );
+    assertEquals(respondRes.status, 200);
+    await respondRes.json();
+
+    const first = await firstPromise;
+    assertEquals(first.status, 200);
+    assertEquals(await first.text(), 'refs-live');
+    assertEquals(first.headers.get(CACHE_HIT_HEADER), null);
+
+    relay.cleanupSession(node.sessionId);
+    relay.dropSession(node.sessionId);
+
+    const second = await fetch(
+      `${relay.baseUrl}/git/${node.sessionId}/info/refs?service=git-upload-pack&session_token=${node.sessionToken}`,
+    );
+    assertEquals(second.status, 404);
+    assertObjectMatch(await second.json(), { ok: false, error: 'session not found' });
+  } finally {
+    await relay.shutdown();
+  }
+});
 
 Deno.test('e2e git cache fallback: serves cached info/refs when session inactive', async () => {
   const relay = createRelayHarness();

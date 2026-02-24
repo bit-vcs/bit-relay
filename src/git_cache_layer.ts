@@ -10,6 +10,10 @@ export interface GitCacheKey {
   requestHash: string;
 }
 
+export interface GitCacheSafeOptions {
+  onError?: (error: unknown) => void;
+}
+
 function normalizeSessionId(sessionId: string): string {
   return sessionId.replaceAll('/', '__');
 }
@@ -100,6 +104,32 @@ export async function readGitCache(
   headers.set(CACHE_HIT_HEADER, '1');
   const body = new Uint8Array(cached.body);
   return new Response(body.buffer as ArrayBuffer, { status: 200, headers });
+}
+
+export async function safeWriteGitCache(
+  cacheStore: CacheStore,
+  cacheKey: GitCacheKey,
+  response: Response,
+  options: GitCacheSafeOptions = {},
+): Promise<void> {
+  try {
+    await writeGitCache(cacheStore, cacheKey, response);
+  } catch (error) {
+    options.onError?.(error);
+  }
+}
+
+export async function safeReadGitCache(
+  cacheStore: CacheStore,
+  cacheKey: GitCacheKey,
+  options: GitCacheSafeOptions = {},
+): Promise<Response | null> {
+  try {
+    return await readGitCache(cacheStore, cacheKey);
+  } catch (error) {
+    options.onError?.(error);
+    return null;
+  }
 }
 
 export { CACHE_HIT_HEADER };

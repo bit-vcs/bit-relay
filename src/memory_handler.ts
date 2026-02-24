@@ -8,7 +8,7 @@ import {
   verifyEd25519Signature,
 } from './signing.ts';
 import { fetchGitHubEd25519Keys, matchesGitHubKey } from './github_keys.ts';
-import type { CacheStore, CacheStoreObject } from './cache_store.ts';
+import type { CacheStore, CacheStoreListResult, CacheStoreObject } from './cache_store.ts';
 import {
   type CacheExchangeRecord,
   classifyCacheExchangeCollision,
@@ -1350,16 +1350,31 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
       }, { status: 200 });
     }
 
-    const listed = await cacheStore.list({
-      kind: 'issue',
-      room,
-      limit,
-      cursor: String(after),
-    });
+    let listed: CacheStoreListResult;
+    try {
+      listed = await cacheStore.list({
+        kind: 'issue',
+        room,
+        limit,
+        cursor: String(after),
+      });
+    } catch {
+      return Response.json({
+        ok: true,
+        room,
+        next_cursor: after,
+        envelopes: [],
+      }, { status: 200 });
+    }
 
     const envelopes: JsonObject[] = [];
     for (const entry of listed.entries) {
-      const cached = await cacheStore.get('issue', entry.key);
+      let cached;
+      try {
+        cached = await cacheStore.get('issue', entry.key);
+      } catch {
+        continue;
+      }
       if (!cached) continue;
       const envelope = parseCachedIssueEnvelope(cached);
       if (!envelope) continue;

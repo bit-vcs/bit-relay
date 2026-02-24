@@ -1,9 +1,11 @@
 import { assertEquals, assertExists } from '@std/assert';
-import { createMemoryCacheStore } from '../src/cache_store.ts';
+import { type CacheStore, createMemoryCacheStore } from '../src/cache_store.ts';
 import {
   buildGitCacheKeyFromRequest,
   CACHE_HIT_HEADER,
   readGitCache,
+  safeReadGitCache,
+  safeWriteGitCache,
   writeGitCache,
 } from '../src/git_cache_layer.ts';
 
@@ -50,4 +52,67 @@ Deno.test('git cache read/write round-trip', async () => {
   assertEquals(after.headers.get(CACHE_HIT_HEADER), '1');
   assertEquals(after.headers.get('content-type'), 'application/x-git-upload-pack-result');
   assertEquals(await after.text(), 'PACK-A');
+});
+
+function createFailingCacheStore(mode: 'read' | 'write'): CacheStore {
+  return {
+    async put(): Promise<void> {
+      if (mode === 'write') {
+        throw new Error('write failed');
+      }
+    },
+    async get(): Promise<null> {
+      if (mode === 'read') {
+        throw new Error('read failed');
+      }
+      return null;
+    },
+    async delete(): Promise<boolean> {
+      return false;
+    },
+    async list() {
+      return { entries: [], cursor: null };
+    },
+  };
+}
+
+Deno.test('safeReadGitCache degrades to null when backend throws', async () => {
+  const req = new Request('http://relay.local/git/repo/info/refs?service=git-upload-pack', {
+    method: 'GET',
+  });
+  const key = await buildGitCacheKeyFromRequest(req, 'repo1', '/info/refs');
+  const errors: unknown[] = [];
+
+  const cached = await safeReadGitCache(createFailingCacheStore('read'), key, {
+    onError(error: unknown) {
+      errors.push(error);
+    },
+  });
+
+  assertEquals(cached, null);
+  assertEquals(errors.length, 1);
+  assertEquals(errors[0] instanceof Error, true);
+});
+
+Deno.test('safeWriteGitCache swallows backend errors in degraded mode', async () => {
+  const req = new Request('http://relay.local/git/repo/git-upload-pack', {
+    method: 'POST',
+    body: 'want-a',
+  });
+  const key = await buildGitCacheKeyFromRequest(req, 'repo1', '/git-upload-pack');
+  const errors: unknown[] = [];
+
+  await safeWriteGitCache(
+    createFailingCacheStore('write'),
+    key,
+    new Response('PACK-A', { status: 200 }),
+    {
+      onError(error: unknown) {
+        errors.push(error);
+      },
+    },
+  );
+
+  assertEquals(errors.length, 1);
+  assertEquals(errors[0] instanceof Error, true);
 });

@@ -1,6 +1,6 @@
 import { assertEquals, assertObjectMatch } from '@std/assert';
 import { createMemoryRelayService } from '../src/memory_handler.ts';
-import { createMemoryCacheStore } from '../src/cache_store.ts';
+import { type CacheStore, createMemoryCacheStore } from '../src/cache_store.ts';
 
 function publishRequest(args: {
   room: string;
@@ -128,6 +128,45 @@ Deno.test('cache issue pull returns 405 for non-GET', async () => {
       }),
     );
     assertEquals(res.status, 405);
+  } finally {
+    service.close();
+  }
+});
+
+function createFailingListCacheStore(): CacheStore {
+  return {
+    async put(): Promise<void> {
+      // no-op
+    },
+    async get(): Promise<null> {
+      return null;
+    },
+    async delete(): Promise<boolean> {
+      return false;
+    },
+    async list() {
+      throw new Error('list failed');
+    },
+  };
+}
+
+Deno.test('cache issue pull degrades when cache backend list fails', async () => {
+  const service = createMemoryRelayService({
+    requireSignatures: false,
+    cacheStore: createFailingListCacheStore(),
+  } as any);
+
+  try {
+    const res = await service.fetch(
+      new Request('http://relay.local/api/v1/cache/issues/pull?room=repo-a&after=10&limit=5'),
+    );
+    assertEquals(res.status, 200);
+    const body = await res.json();
+    assertEquals(body.ok, true);
+    assertEquals(body.room, 'repo-a');
+    assertEquals(body.next_cursor, 10);
+    assertEquals(Array.isArray(body.envelopes), true);
+    assertEquals(body.envelopes.length, 0);
   } finally {
     service.close();
   }

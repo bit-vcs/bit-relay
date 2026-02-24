@@ -127,7 +127,7 @@
 ### 完了条件
 
 - [x] アクティブ serve ノード不在でもキャッシュから clone/fetch できる
-- [ ] R2 障害時は degraded mode で relay 本体は継続稼働する
+- [x] R2 障害時は degraded mode で relay 本体は継続稼働する
 
 ---
 
