@@ -20,6 +20,7 @@ import {
   parseIssueEventCursorFromKey,
   parseIssueSourceUpdatedAtMs,
 } from './issue_projection.ts';
+import { createRelayRequestMetricRecorder, logRelayMetric } from './relay_observability.ts';
 
 type JsonObject = { [key: string]: JsonValue };
 
@@ -108,6 +109,11 @@ function normalizeOptionalNonNegativeInt(raw: number | undefined, fallback: numb
   return Math.max(0, Math.trunc(raw));
 }
 
+function describeError(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
+
 export function createRelayCacheAdapter(options: RelayCacheAdapterOptions): RelayCacheAdapter {
   const cacheStore = options.cacheStore;
   const isValidRoomName = options.isValidRoomName;
@@ -134,12 +140,36 @@ export function createRelayCacheAdapter(options: RelayCacheAdapterOptions): Rela
       DEFAULT_CACHE_PERSIST_RETRY_MAX_DELAY_MS,
     ),
   );
+  const cachePersistRequestMetrics = createRelayRequestMetricRecorder();
 
   const persistenceQueue = cacheStore
     ? createCachePersistenceQueue({
       maxRetries: cachePersistMaxRetries,
       retryBaseDelayMs: cachePersistRetryBaseDelayMs,
       retryMaxDelayMs: cachePersistRetryMaxDelayMs,
+      onRetry(entry) {
+        logRelayMetric({
+          metric: 'relay.cache.persist.retry',
+          occurredAt: nowSec(),
+          value: 1,
+          unit: 'count',
+          target: 'cache.persist',
+          detail: {
+            retry_count: entry.retryCount,
+            delay_ms: entry.delayMs,
+            error: describeError(entry.error),
+          },
+        });
+      },
+      onSettled(entry) {
+        cachePersistRequestMetrics.record({
+          operation: 'cache.persist',
+          occurredAt: nowSec(),
+          status: entry.success ? 200 : 500,
+          latencyMs: entry.durationMs,
+          retryCount: entry.retryCount,
+        });
+      },
     })
     : null;
 

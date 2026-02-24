@@ -1,6 +1,10 @@
 import { createMemoryRelayService } from './memory_handler.ts';
 import { createGitServeSession } from './git_serve_session.ts';
-import { logRelayAudit, logRelayEvent } from './relay_observability.ts';
+import {
+  createRelayRequestMetricRecorder,
+  logRelayAudit,
+  logRelayEvent,
+} from './relay_observability.ts';
 import { parseRelayRuntimeConfigFromEnv } from './runtime_config.ts';
 import { createAdminGitHubApi } from './admin_github_api.ts';
 import { createCacheSyncWorker } from './cache_sync_worker.ts';
@@ -79,6 +83,7 @@ const triggerDispatcher = createWebhookTriggerDispatcher({
   refPrefixes: runtimeConfig.trigger.refPrefixes,
   fetchFn: fetch,
 });
+const requestMetrics = createRelayRequestMetricRecorder();
 
 if (runtimeConfig.cache.provider === 'r2') {
   console.warn(
@@ -114,6 +119,12 @@ function parseCacheExchangePullBody(body: Record<string, unknown>): {
 
 function nowEpochSec(): number {
   return Math.floor(Date.now() / 1000);
+}
+
+function metricOperationForRequest(request: Request): string {
+  const url = new URL(request.url);
+  const pathname = url.pathname.startsWith('/git/') ? '/git/:session' : url.pathname;
+  return `${request.method.toUpperCase()} ${pathname}`;
 }
 
 async function resolveLocalRelayNodeId(): Promise<string> {
@@ -294,7 +305,7 @@ async function handleGitRelayRequest(args: {
   return response;
 }
 
-async function handleRequest(request: Request): Promise<Response> {
+async function handleRequestCore(request: Request): Promise<Response> {
   const url = new URL(request.url);
   const pathname = url.pathname;
   let namedGitFallback: { sessionId: string; gitSubPath: string } | null = null;
@@ -474,6 +485,31 @@ async function handleRequest(request: Request): Promise<Response> {
   }
 
   return response;
+}
+
+async function handleRequest(request: Request): Promise<Response> {
+  const startedAtMs = Date.now();
+  const operation = metricOperationForRequest(request);
+  try {
+    const response = await handleRequestCore(request);
+    requestMetrics.record({
+      operation,
+      occurredAt: nowEpochSec(),
+      status: response.status,
+      latencyMs: Math.max(0, Date.now() - startedAtMs),
+      retryCount: 0,
+    });
+    return response;
+  } catch (error) {
+    requestMetrics.record({
+      operation,
+      occurredAt: nowEpochSec(),
+      status: 500,
+      latencyMs: Math.max(0, Date.now() - startedAtMs),
+      retryCount: 0,
+    });
+    throw error;
+  }
 }
 
 console.log(`[bit-relay] listening on http://${host}:${port}`);

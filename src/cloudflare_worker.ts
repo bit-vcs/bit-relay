@@ -8,7 +8,7 @@ import {
   type MemoryRelayService,
 } from './memory_handler.ts';
 import { GitServeSession } from './git_serve_session.ts';
-import { logRelayAudit } from './relay_observability.ts';
+import { createRelayRequestMetricRecorder, logRelayAudit } from './relay_observability.ts';
 import { parseMemoryRelayOptionsFromEnv } from './runtime_config.ts';
 import { createAdminGitHubApi } from './admin_github_api.ts';
 
@@ -61,9 +61,16 @@ export interface RelayWorkerEnv {
 const IDENTITY_KEY = 'relay_identity_v1';
 let fallbackService: MemoryRelayService | null = null;
 let adminGitHubApi: ReturnType<typeof createAdminGitHubApi> | null = null;
+const requestMetrics = createRelayRequestMetricRecorder();
 
 function nowEpochSec(): number {
   return Math.floor(Date.now() / 1000);
+}
+
+function metricOperationForRequest(request: Request): string {
+  const url = new URL(request.url);
+  const pathname = url.pathname.startsWith('/git/') ? '/git/:session' : url.pathname;
+  return `${request.method.toUpperCase()} ${pathname}`;
 }
 
 function buildOptions(env: RelayWorkerEnv): MemoryRelayOptions {
@@ -342,102 +349,65 @@ export class RelayRoom {
   }
 }
 
-const worker = {
-  async fetch(request: Request, env: RelayWorkerEnv): Promise<Response> {
-    const url = new URL(request.url);
-    const adminResponse = await getAdminGitHubApi(env).handle(request);
-    if (adminResponse) return adminResponse;
-    if (url.pathname === '/health') {
-      return healthResponse();
-    }
+async function handleWorkerRequest(request: Request, env: RelayWorkerEnv): Promise<Response> {
+  const url = new URL(request.url);
+  const adminResponse = await getAdminGitHubApi(env).handle(request);
+  if (adminResponse) return adminResponse;
+  if (url.pathname === '/health') {
+    return healthResponse();
+  }
 
-    // Git serve session routes: /git/<session_id>/...
-    // Both named (owner/repo/path) and random (randomId/path) patterns can
-    // match the same URL (e.g. /git/AbCdEfGh/info/refs).  When ambiguous,
-    // try named first; if that session isn't active, fall back to random.
-    const namedGitMatch = url.pathname.match(
-      /^\/git\/([A-Za-z0-9][A-Za-z0-9._-]*)\/([A-Za-z0-9][A-Za-z0-9._-]*)\/(.*)/,
-    );
-    const randomGitMatch = url.pathname.match(/^\/git\/([A-Za-z0-9]{6,16})\/(.*)/);
+  // Git serve session routes: /git/<session_id>/...
+  // Both named (owner/repo/path) and random (randomId/path) patterns can
+  // match the same URL (e.g. /git/AbCdEfGh/info/refs).  When ambiguous,
+  // try named first; if that session isn't active, fall back to random.
+  const namedGitMatch = url.pathname.match(
+    /^\/git\/([A-Za-z0-9][A-Za-z0-9._-]*)\/([A-Za-z0-9][A-Za-z0-9._-]*)\/(.*)/,
+  );
+  const randomGitMatch = url.pathname.match(/^\/git\/([A-Za-z0-9]{6,16})\/(.*)/);
 
-    if (namedGitMatch && env.GIT_SERVE_SESSION) {
-      const candidateId = `${namedGitMatch[1]}/${namedGitMatch[2]}`;
-      if (randomGitMatch) {
-        // Ambiguous: could be named or random session.
-        // Try named first, fall back to random if not active.
-        const response = await handleGitRoute(candidateId, namedGitMatch[3], request, env);
-        if (response.status !== 404) {
-          return response;
-        }
-        return handleGitRoute(randomGitMatch[1], randomGitMatch[2], request, env);
-      }
-      return handleGitRoute(candidateId, namedGitMatch[3], request, env);
-    }
-
+  if (namedGitMatch && env.GIT_SERVE_SESSION) {
+    const candidateId = `${namedGitMatch[1]}/${namedGitMatch[2]}`;
     if (randomGitMatch) {
+      // Ambiguous: could be named or random session.
+      // Try named first, fall back to random if not active.
+      const response = await handleGitRoute(candidateId, namedGitMatch[3], request, env);
+      if (response.status !== 404) {
+        return response;
+      }
       return handleGitRoute(randomGitMatch[1], randomGitMatch[2], request, env);
     }
+    return handleGitRoute(candidateId, namedGitMatch[3], request, env);
+  }
 
-    // Serve API routes: /api/v1/serve/...
-    if (url.pathname.startsWith('/api/v1/serve/')) {
-      return handleServeRoute(url, request, env);
+  if (randomGitMatch) {
+    return handleGitRoute(randomGitMatch[1], randomGitMatch[2], request, env);
+  }
+
+  // Serve API routes: /api/v1/serve/...
+  if (url.pathname.startsWith('/api/v1/serve/')) {
+    return handleServeRoute(url, request, env);
+  }
+
+  if (!isRelayRoute(url.pathname)) {
+    return Response.json({ ok: false, error: 'not found' }, { status: 404 });
+  }
+
+  const room = (url.searchParams.get('room') ?? DEFAULT_ROOM).trim();
+  if (!isValidRoomName(room)) {
+    return invalidRoomResponse();
+  }
+
+  if (!env.RELAY_ROOM) {
+    if (fallbackService === null) {
+      fallbackService = createMemoryRelayService(buildOptions(env));
     }
-
-    if (!isRelayRoute(url.pathname)) {
-      return Response.json({ ok: false, error: 'not found' }, { status: 404 });
-    }
-
-    const room = (url.searchParams.get('room') ?? DEFAULT_ROOM).trim();
-    if (!isValidRoomName(room)) {
-      return invalidRoomResponse();
-    }
-
-    if (!env.RELAY_ROOM) {
-      if (fallbackService === null) {
-        fallbackService = createMemoryRelayService(buildOptions(env));
-      }
-      const response = await fallbackService.fetch(request);
-      if (request.method === 'POST') {
-        const sender = url.searchParams.get('sender') ?? '';
-        if (url.pathname === '/api/v1/publish') {
-          const topic = url.searchParams.get('topic') ?? 'notify';
-          const id = url.searchParams.get('id') ?? '';
-          logRelayAudit({
-            action: response.status === 200 ? 'publish.accepted' : 'publish.rejected',
-            occurredAt: nowEpochSec(),
-            status: response.status,
-            room,
-            sender: sender || null,
-            target: url.pathname,
-            id: id || null,
-            detail: { topic },
-          });
-        } else if (url.pathname === '/api/v1/review') {
-          const prId = url.searchParams.get('pr_id') ?? '';
-          const verdict = url.searchParams.get('verdict') ?? '';
-          logRelayAudit({
-            action: response.status === 200 ? 'review.recorded' : 'review.rejected',
-            occurredAt: nowEpochSec(),
-            status: response.status,
-            room,
-            sender: sender || null,
-            target: url.pathname,
-            id: prId || null,
-            detail: { verdict },
-          });
-        }
-      }
-      return response;
-    }
-
-    const id = env.RELAY_ROOM.idFromName(room);
-    const stub = env.RELAY_ROOM.get(id);
-    const response = await stub.fetch(request);
+    const response = await fallbackService.fetch(request);
     if (request.method === 'POST') {
       const sender = url.searchParams.get('sender') ?? '';
       if (url.pathname === '/api/v1/publish') {
         const topic = url.searchParams.get('topic') ?? 'notify';
-        const idValue = url.searchParams.get('id') ?? '';
+        const id = url.searchParams.get('id') ?? '';
         logRelayAudit({
           action: response.status === 200 ? 'publish.accepted' : 'publish.rejected',
           occurredAt: nowEpochSec(),
@@ -445,7 +415,7 @@ const worker = {
           room,
           sender: sender || null,
           target: url.pathname,
-          id: idValue || null,
+          id: id || null,
           detail: { topic },
         });
       } else if (url.pathname === '/api/v1/review') {
@@ -464,6 +434,68 @@ const worker = {
       }
     }
     return response;
+  }
+
+  const id = env.RELAY_ROOM.idFromName(room);
+  const stub = env.RELAY_ROOM.get(id);
+  const response = await stub.fetch(request);
+  if (request.method === 'POST') {
+    const sender = url.searchParams.get('sender') ?? '';
+    if (url.pathname === '/api/v1/publish') {
+      const topic = url.searchParams.get('topic') ?? 'notify';
+      const idValue = url.searchParams.get('id') ?? '';
+      logRelayAudit({
+        action: response.status === 200 ? 'publish.accepted' : 'publish.rejected',
+        occurredAt: nowEpochSec(),
+        status: response.status,
+        room,
+        sender: sender || null,
+        target: url.pathname,
+        id: idValue || null,
+        detail: { topic },
+      });
+    } else if (url.pathname === '/api/v1/review') {
+      const prId = url.searchParams.get('pr_id') ?? '';
+      const verdict = url.searchParams.get('verdict') ?? '';
+      logRelayAudit({
+        action: response.status === 200 ? 'review.recorded' : 'review.rejected',
+        occurredAt: nowEpochSec(),
+        status: response.status,
+        room,
+        sender: sender || null,
+        target: url.pathname,
+        id: prId || null,
+        detail: { verdict },
+      });
+    }
+  }
+  return response;
+}
+
+const worker = {
+  async fetch(request: Request, env: RelayWorkerEnv): Promise<Response> {
+    const startedAtMs = Date.now();
+    const operation = metricOperationForRequest(request);
+    try {
+      const response = await handleWorkerRequest(request, env);
+      requestMetrics.record({
+        operation,
+        occurredAt: nowEpochSec(),
+        status: response.status,
+        latencyMs: Math.max(0, Date.now() - startedAtMs),
+        retryCount: 0,
+      });
+      return response;
+    } catch (error) {
+      requestMetrics.record({
+        operation,
+        occurredAt: nowEpochSec(),
+        status: 500,
+        latencyMs: Math.max(0, Date.now() - startedAtMs),
+        retryCount: 0,
+      });
+      throw error;
+    }
   },
 };
 

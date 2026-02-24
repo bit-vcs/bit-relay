@@ -64,3 +64,34 @@ Deno.test('cache persistence queue rejects after retry budget is exhausted', asy
   );
   assertEquals(attempts, 2);
 });
+
+Deno.test('cache persistence queue exposes retry/settled metrics hooks', async () => {
+  const retries: Array<{ retryCount: number; delayMs: number }> = [];
+  const settled: Array<{ success: boolean; retryCount: number; attempts: number }> = [];
+  let attempts = 0;
+  const queue = createCachePersistenceQueue({
+    maxRetries: 2,
+    retryBaseDelayMs: 3,
+    sleep: async () => {},
+    onRetry(entry) {
+      retries.push({ retryCount: entry.retryCount, delayMs: entry.delayMs });
+    },
+    onSettled(entry) {
+      settled.push({
+        success: entry.success,
+        retryCount: entry.retryCount,
+        attempts: entry.attempts,
+      });
+    },
+  });
+
+  await queue.enqueue(async () => {
+    attempts += 1;
+    if (attempts < 2) {
+      throw new Error('transient');
+    }
+  });
+
+  assertEquals(retries, [{ retryCount: 1, delayMs: 3 }]);
+  assertEquals(settled, [{ success: true, retryCount: 1, attempts: 2 }]);
+});

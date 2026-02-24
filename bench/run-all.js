@@ -4,6 +4,7 @@ import inboxFn from './scenarios/inbox.js';
 import presenceFn from './scenarios/presence.js';
 import websocketFn from './scenarios/websocket.js';
 import gitServeFn from './scenarios/git-serve.js';
+import multiRelayCacheIssueSyncFn from './scenarios/multi-relay-cache-issue-sync.js';
 
 // Combined runner: each scenario starts at a staggered offset.
 // Individual scenario files also work standalone with their own `options`.
@@ -72,6 +73,17 @@ export const options = {
       startTime: '100s',
       exec: 'gitServe',
     },
+    multi_relay_cache_issue_sync: {
+      executor: 'ramping-vus',
+      startVUs: 1,
+      stages: [
+        { duration: '10s', target: 10 },
+        { duration: '10s', target: 40 },
+        { duration: '10s', target: 0 },
+      ],
+      startTime: '135s',
+      exec: 'multiRelayCacheIssueSync',
+    },
   },
   thresholds: {
     http_req_duration: ['p(95)<500', 'p(99)<1000'],
@@ -101,4 +113,8 @@ export function websocket() {
 
 export function gitServe() {
   gitServeFn();
+}
+
+export function multiRelayCacheIssueSync() {
+  multiRelayCacheIssueSyncFn();
 }
