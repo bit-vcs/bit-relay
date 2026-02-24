@@ -290,6 +290,7 @@ export function parseMemoryRelayOptionsFromEnv(getEnv: EnvGetter): MemoryRelayOp
       getEnv('RELAY_CACHE_EXCHANGE_MAX_RECORDS'),
       DEFAULT_CACHE_EXCHANGE_MAX_RECORDS,
     ),
+    githubWebhookSecret: parseOptionalString(getEnv('RELAY_GITHUB_WEBHOOK_SECRET')) ?? undefined,
   };
 }
 

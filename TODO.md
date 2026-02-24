@@ -143,7 +143,7 @@
 ### TDD
 
 - [x] 探索: 既存 `poll` と重複しない API 契約を決める
-- [ ] Red: issue 作成/更新/close/再オープンの整合性テスト
+- [x] Red: issue 作成/更新/close/再オープンの整合性テスト
 - [x] Red: offline node 想定 E2E（origin 停止中でも取得可）
 - [x] Green: issue cache 実装
 - [ ] Refactor: issue projection 層を分離
@@ -159,22 +159,22 @@
 
 ### TODO
 
-- [ ] GitHub webhook 受信エンドポイント（`issues`, `issue_comment`, `label`）
-- [ ] GitHub event -> bit issue event のマッピング定義
-- [ ] idempotency key（`delivery_id`）で重複防止
+- [x] GitHub webhook 受信エンドポイント（`issues`, `issue_comment`, `label`）
+- [x] GitHub event -> bit issue event のマッピング定義
+- [x] idempotency key（`delivery_id`）で重複防止
 - [ ] 同期失敗時の DLQ / retry キュー
 
 ### TDD
 
-- [ ] 探索: 一方向同期（GitHub -> bit）から開始し、競合時ルールを確定
-- [ ] Red: webhook 署名検証テスト
-- [ ] Red: 同一イベント再送テスト（重複抑止）
-- [ ] Green: mapper + apply 実装
+- [x] 探索: 一方向同期（GitHub -> bit）から開始し、競合時ルールを確定
+- [x] Red: webhook 署名検証テスト
+- [x] Red: 同一イベント再送テスト（重複抑止）
+- [x] Green: mapper + apply 実装
 - [ ] Refactor: provider 非依存の issue sync engine へ分離
 
 ### 完了条件
 
-- [ ] GitHub issue 更新が bit issue へ反映される
+- [x] GitHub issue 更新が bit issue へ反映される
 - [ ] 再送や順不同イベントでも破綻しない
 
 ---

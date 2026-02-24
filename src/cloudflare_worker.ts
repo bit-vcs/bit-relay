@@ -55,6 +55,7 @@ export interface RelayWorkerEnv {
   RELAY_ADMIN_TOKEN?: string;
   RELAY_GITHUB_TOKEN?: string;
   RELAY_GITHUB_API_BASE_URL?: string;
+  RELAY_GITHUB_WEBHOOK_SECRET?: string;
 }
 
 const IDENTITY_KEY = 'relay_identity_v1';

@@ -48,6 +48,7 @@ const service = createMemoryRelayService({
     ? runtimeConfig.peers.urls
     : runtimeConfig.relay.peerRelayUrls,
   cacheStore: relayCacheStore,
+  githubWebhookSecret: runtimeConfig.github.webhookSecret ?? undefined,
 });
 const adminGitHubApi = createAdminGitHubApi({
   adminToken: Deno.env.get('RELAY_ADMIN_TOKEN') ?? runtimeConfig.relay.authToken,

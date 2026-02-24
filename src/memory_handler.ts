@@ -210,6 +210,7 @@ export interface MemoryRelayOptions {
   cacheExchangeMaxHops?: number;
   cacheExchangeMaxRecords?: number;
   cacheStore?: CacheStore;
+  githubWebhookSecret?: string;
   fetchFn?: typeof globalThis.fetch;
 }
 
@@ -239,6 +240,7 @@ const DEFAULT_WS_PING_INTERVAL_MS = 30_000;
 const DEFAULT_WS_IDLE_TIMEOUT_MS = 90_000;
 const DEFAULT_CACHE_EXCHANGE_MAX_HOPS = 3;
 const DEFAULT_CACHE_EXCHANGE_MAX_RECORDS = 10_000;
+const MAX_GITHUB_WEBHOOK_DELIVERY_IDS = 10_000;
 const ISSUE_EVENT_KEY_PREFIX = 'issue/events/';
 const ISSUE_SNAPSHOT_KEY_PREFIX = 'issue/snapshots/';
 const ISSUE_CURSOR_KEY_PREFIX = 'issue/cursors/';
@@ -385,6 +387,7 @@ function timingSafeEqual(a: string, b: string): boolean {
 }
 
 function shouldRequireAuth(pathname: string): boolean {
+  if (pathname === '/api/v1/github/webhook') return false;
   return pathname === '/ws' || pathname.startsWith('/api/v1/');
 }
 
@@ -634,6 +637,153 @@ function parseIssueCacheCursorRecord(value: CacheStoreObject): IssueCacheCursorR
     cursor,
     updated_at: updatedAt,
   };
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes).map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+async function hmacSha256Hex(secret: string, message: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  const signature = new Uint8Array(
+    await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(message)),
+  );
+  return bytesToHex(signature);
+}
+
+function parseGitHubSignatureHeader(value: string): string | null {
+  const trimmed = value.trim();
+  const matched = trimmed.match(/^sha256=([a-fA-F0-9]{64})$/);
+  if (!matched) return null;
+  return matched[1].toLowerCase();
+}
+
+function normalizeGitHubRoomName(repositoryFullName: string | null): string {
+  const normalized = (repositoryFullName ?? '').trim().replaceAll('/', '-');
+  if (isValidRoomName(normalized)) return normalized;
+  return DEFAULT_ROOM;
+}
+
+function readGitHubRepositoryFullName(payload: Record<string, unknown>): string | null {
+  if (!isObjectRecord(payload.repository)) return null;
+  const fullName = typeof payload.repository.full_name === 'string'
+    ? payload.repository.full_name.trim()
+    : '';
+  return fullName.length > 0 ? fullName : null;
+}
+
+function readGitHubIssueNumber(payload: Record<string, unknown>): number | null {
+  if (!isObjectRecord(payload.issue)) return null;
+  const raw = payload.issue.number;
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return null;
+  const value = Math.trunc(raw);
+  return value > 0 ? value : null;
+}
+
+function readGitHubSender(payload: Record<string, unknown>): string {
+  if (isObjectRecord(payload.sender) && typeof payload.sender.login === 'string') {
+    const login = payload.sender.login.trim();
+    if (login.length > 0) return `github:${login}`;
+  }
+  return 'github:webhook';
+}
+
+function mapGitHubWebhookTopic(event: string, action: string): string | null {
+  if (event === 'issues') {
+    if (action === 'opened' || action === 'reopened') {
+      return action === 'opened' ? 'issue' : 'issue.reopened';
+    }
+    if (action === 'edited') return 'issue.updated';
+    if (action === 'closed') return 'issue.closed';
+    if (action === 'labeled' || action === 'unlabeled') return 'issue.label';
+    if (action.length > 0) {
+      const candidate = `issue.${action.toLowerCase().replaceAll(/[^a-z0-9._-]/g, '_')}`;
+      return isValidTopic(candidate) ? candidate : null;
+    }
+    return 'issue';
+  }
+
+  if (event === 'issue_comment') {
+    const suffix = (action.length > 0 ? action : 'created').toLowerCase().replaceAll(
+      /[^a-z0-9._-]/g,
+      '_',
+    );
+    const candidate = `issue.comment.${suffix}`;
+    return isValidTopic(candidate) ? candidate : null;
+  }
+
+  if (event === 'label') {
+    return 'issue.label';
+  }
+
+  return null;
+}
+
+function buildGitHubIssueId(
+  repositoryFullName: string | null,
+  issueNumber: number | null,
+  deliveryId: string,
+): string {
+  if (repositoryFullName && issueNumber) {
+    return `${repositoryFullName}#${issueNumber}`;
+  }
+  if (issueNumber) {
+    return `issue#${issueNumber}`;
+  }
+  return `delivery:${deliveryId}`;
+}
+
+function buildGitHubIssuePayload(args: {
+  deliveryId: string;
+  event: string;
+  action: string;
+  issueId: string;
+  repositoryFullName: string | null;
+  parsed: Record<string, unknown>;
+}): JsonObject {
+  const payload: JsonObject = {
+    source: 'github',
+    delivery_id: args.deliveryId,
+    event: args.event,
+    action: args.action,
+    issue_id: args.issueId,
+    repository: args.repositoryFullName ?? '',
+  };
+
+  if (isObjectRecord(args.parsed.issue)) {
+    const issue = args.parsed.issue;
+    payload.issue = {
+      number: typeof issue.number === 'number' ? Math.trunc(issue.number) : 0,
+      title: typeof issue.title === 'string' ? issue.title : '',
+      state: typeof issue.state === 'string' ? issue.state : '',
+      html_url: typeof issue.html_url === 'string' ? issue.html_url : '',
+    };
+  }
+
+  if (isObjectRecord(args.parsed.comment)) {
+    const comment = args.parsed.comment;
+    payload.comment = {
+      id: typeof comment.id === 'number' ? Math.trunc(comment.id) : 0,
+      body: typeof comment.body === 'string' ? comment.body : '',
+      html_url: typeof comment.html_url === 'string' ? comment.html_url : '',
+    };
+  }
+
+  if (isObjectRecord(args.parsed.label)) {
+    const label = args.parsed.label;
+    payload.label = {
+      name: typeof label.name === 'string' ? label.name : '',
+      color: typeof label.color === 'string' ? label.color : '',
+    };
+  }
+
+  return payload;
 }
 
 function parseAckIds(
@@ -1131,6 +1281,7 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
     Math.trunc(options.cacheExchangeMaxRecords ?? DEFAULT_CACHE_EXCHANGE_MAX_RECORDS),
   );
   const cacheStore = options.cacheStore ?? null;
+  const githubWebhookSecret = (options.githubWebhookSecret ?? '').trim();
   const fetchFn = options.fetchFn ?? globalThis.fetch;
 
   const rooms = new Map<string, RoomState>();
@@ -1141,6 +1292,7 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
   const noncesBySender = new Map<string, Map<string, number>>();
   const cacheExchangeRecords: CacheExchangeRecord[] = [];
   const issueCursorByRoom = new Map<string, number>();
+  const githubWebhookDeliveryIds = new Map<string, number>();
   let cacheExchangeCursor = 0;
   let lastReapAt = Date.now();
 
@@ -1166,6 +1318,22 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
       hopCount,
       maxHops,
     });
+  }
+
+  function hasGitHubDeliveryId(deliveryId: string): boolean {
+    return githubWebhookDeliveryIds.has(deliveryId);
+  }
+
+  function rememberGitHubDeliveryId(deliveryId: string, nowSec: number): void {
+    githubWebhookDeliveryIds.set(deliveryId, nowSec);
+    if (githubWebhookDeliveryIds.size <= MAX_GITHUB_WEBHOOK_DELIVERY_IDS) return;
+    const overflow = githubWebhookDeliveryIds.size - MAX_GITHUB_WEBHOOK_DELIVERY_IDS;
+    let removed = 0;
+    for (const key of githubWebhookDeliveryIds.keys()) {
+      githubWebhookDeliveryIds.delete(key);
+      removed += 1;
+      if (removed >= overflow) break;
+    }
   }
 
   async function putCacheJsonObject(args: {
@@ -2110,6 +2278,124 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
     );
   }
 
+  async function handleGitHubWebhook(request: Request): Promise<Response> {
+    if (request.method !== 'POST') {
+      return methodNotAllowedResponse();
+    }
+
+    if (githubWebhookSecret.length === 0) {
+      return toErrorResponse('github webhook secret is not configured', 503);
+    }
+
+    const event = (request.headers.get('x-github-event') ?? '').trim().toLowerCase();
+    if (event !== 'issues' && event !== 'issue_comment' && event !== 'label') {
+      return toErrorResponse('unsupported github webhook event', 400);
+    }
+    const deliveryId = (request.headers.get('x-github-delivery') ?? '').trim();
+    if (deliveryId.length === 0) {
+      return toErrorResponse('missing github delivery id', 400);
+    }
+    const signatureHex = parseGitHubSignatureHeader(
+      request.headers.get('x-hub-signature-256') ?? '',
+    );
+    if (!signatureHex) {
+      return toErrorResponse('invalid github webhook signature', 401);
+    }
+
+    const requestBody = await request.text();
+    const expectedSignatureHex = await hmacSha256Hex(githubWebhookSecret, requestBody);
+    if (!timingSafeEqual(expectedSignatureHex, signatureHex)) {
+      return toErrorResponse('invalid github webhook signature', 401);
+    }
+
+    if (hasGitHubDeliveryId(deliveryId)) {
+      return Response.json(
+        {
+          ok: true,
+          accepted: false,
+          duplicate: true,
+          delivery_id: deliveryId,
+          event,
+        },
+        { status: 200 },
+      );
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(requestBody);
+    } catch {
+      return toErrorResponse('invalid json payload', 400);
+    }
+    if (!isObjectRecord(parsed)) {
+      return toErrorResponse('invalid json payload', 400);
+    }
+
+    const action = (typeof parsed.action === 'string' ? parsed.action : '').trim().toLowerCase();
+    const topic = mapGitHubWebhookTopic(event, action);
+    if (!topic || !isValidTopic(topic)) {
+      return toErrorResponse('unsupported github webhook action', 400);
+    }
+
+    const repositoryFullName = readGitHubRepositoryFullName(parsed);
+    const room = normalizeGitHubRoomName(repositoryFullName);
+    const issueNumber = readGitHubIssueNumber(parsed);
+    const issueId = buildGitHubIssueId(repositoryFullName, issueNumber, deliveryId);
+    const envelopePayload = buildGitHubIssuePayload({
+      deliveryId,
+      event,
+      action,
+      issueId,
+      repositoryFullName,
+      parsed,
+    });
+    const sender = readGitHubSender(parsed);
+    const envelopeId = `gh-${deliveryId}`;
+    const nowSec = nowEpochSec();
+
+    const roomState = getOrCreateRoomState(rooms, room);
+    const result = publishIntoRoom(
+      roomState,
+      room,
+      sender,
+      topic,
+      envelopeId,
+      '',
+      envelopePayload,
+      maxMessagesPerRoom,
+    );
+
+    if (
+      result.changed &&
+      result.status === 200 &&
+      result.envelope &&
+      result.body.accepted === true &&
+      typeof result.body.cursor === 'number'
+    ) {
+      broadcastPublish(roomState, room, result.envelope, result.body.cursor as number);
+      recordCacheExchange(result.envelope, relayNodeId, 0, cacheExchangeMaxHops);
+      await persistEnvelopeToCache(result.envelope, result.body.cursor as number);
+    }
+
+    rememberGitHubDeliveryId(deliveryId, nowSec);
+    const accepted = result.status === 200 && result.body.accepted === true;
+    return Response.json(
+      {
+        ok: result.status === 200,
+        accepted,
+        duplicate: !accepted,
+        delivery_id: deliveryId,
+        event,
+        action,
+        topic,
+        room,
+        issue_id: issueId,
+        cursor: typeof result.body.cursor === 'number' ? result.body.cursor : null,
+      },
+      { status: result.status },
+    );
+  }
+
   async function fetch(request: Request): Promise<Response> {
     if (Date.now() - lastReapAt >= wsPingIntervalMs) {
       reapDeadConnections();
@@ -2141,6 +2427,10 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
 
     if (pathname === '/api/v1/key/verify-github') {
       return handleKeyVerifyGitHub(request);
+    }
+
+    if (pathname === '/api/v1/github/webhook') {
+      return handleGitHubWebhook(request);
     }
 
     if (pathname === '/api/v1/cache/exchange/discovery') {

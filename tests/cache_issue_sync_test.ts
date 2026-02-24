@@ -104,6 +104,85 @@ Deno.test('cache issue sync returns snapshots and incremental events', async () 
   }
 });
 
+Deno.test('cache issue sync keeps lifecycle order for create/update/close/reopen', async () => {
+  const cacheStore = createMemoryCacheStore();
+  const service = createMemoryRelayService({
+    requireSignatures: false,
+    cacheStore,
+  } as any);
+
+  try {
+    await service.fetch(
+      publishRequest({
+        room: 'repo-lifecycle',
+        sender: 'alice',
+        id: 'l-1',
+        topic: 'issue',
+        payload: { issue_id: 'issue-77', state: 'open', title: 'first' },
+      }),
+    );
+    await service.fetch(
+      publishRequest({
+        room: 'repo-lifecycle',
+        sender: 'alice',
+        id: 'l-2',
+        topic: 'issue.updated',
+        payload: { issue_id: 'issue-77', state: 'open', title: 'edited' },
+      }),
+    );
+    await service.fetch(
+      publishRequest({
+        room: 'repo-lifecycle',
+        sender: 'alice',
+        id: 'l-3',
+        topic: 'issue.closed',
+        payload: { issue_id: 'issue-77', state: 'closed' },
+      }),
+    );
+    await service.fetch(
+      publishRequest({
+        room: 'repo-lifecycle',
+        sender: 'alice',
+        id: 'l-4',
+        topic: 'issue.reopened',
+        payload: { issue_id: 'issue-77', state: 'open' },
+      }),
+    );
+
+    const syncRes = await service.fetch(
+      new Request(
+        'http://relay.local/api/v1/cache/issues/sync?room=repo-lifecycle&after=0&limit=10',
+      ),
+    );
+    assertEquals(syncRes.status, 200);
+    const sync = await syncRes.json() as {
+      next_cursor: number;
+      room_cursor: number;
+      events: Array<Record<string, unknown>>;
+      snapshots: Array<Record<string, unknown>>;
+    };
+    assertEquals(sync.next_cursor, 4);
+    assertEquals(sync.room_cursor, 4);
+    assertEquals(sync.events.length, 4);
+    assertObjectMatch(sync.events[0], { cursor: 1, issue_id: 'issue-77', action: 'upsert' });
+    assertObjectMatch(sync.events[1], { cursor: 2, issue_id: 'issue-77', action: 'updated' });
+    assertObjectMatch(sync.events[2], { cursor: 3, issue_id: 'issue-77', action: 'closed' });
+    assertObjectMatch(sync.events[3], { cursor: 4, issue_id: 'issue-77', action: 'reopened' });
+    assertEquals(sync.snapshots.length, 1);
+    assertObjectMatch(sync.snapshots[0], {
+      issue_id: 'issue-77',
+      last_cursor: 4,
+      envelope: {
+        id: 'l-4',
+        topic: 'issue.reopened',
+        payload: { issue_id: 'issue-77', state: 'open' },
+      },
+    });
+  } finally {
+    service.close();
+  }
+});
+
 Deno.test('cache issue sync keeps room cursor across relay restart with shared cache store', async () => {
   const sharedCacheStore = createMemoryCacheStore();
   const first = createMemoryRelayService({
