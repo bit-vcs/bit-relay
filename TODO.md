@@ -114,6 +114,7 @@
 - [ ] キャッシュ索引（content hash, ref, room, updated_at）を定義
 - [ ] R2 から clone/fetch 可能な read path を追加
 - [ ] GC/TTL と容量上限ポリシーを追加
+- [x] git serve の clone/fetch read fallback を cache store 経由で追加（memory）
 
 ### TDD
 

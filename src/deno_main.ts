@@ -5,6 +5,8 @@ import { parseRelayRuntimeConfigFromEnv } from './runtime_config.ts';
 import { createAdminGitHubApi } from './admin_github_api.ts';
 import { createCacheSyncWorker } from './cache_sync_worker.ts';
 import type { CacheExchangeEntry } from './cache_exchange.ts';
+import { createMemoryCacheStore } from './cache_store.ts';
+import { buildGitCacheKeyFromRequest, readGitCache, writeGitCache } from './git_cache_layer.ts';
 
 function parsePositiveInt(raw: string | undefined, fallback: number): number {
   const value = Number.parseInt(raw ?? '', 10);
@@ -55,9 +57,16 @@ const gitServeSessionOptions = runtimeConfig.gitServe.sessionTtlSec &&
   : undefined;
 
 const gitServeSessions = new Map<string, ReturnType<typeof createGitServeSession>>();
+const gitCacheStore = createMemoryCacheStore();
 const relayAuthToken = (runtimeConfig.relay.authToken ?? '').trim();
 const peerSyncAuthToken = (runtimeConfig.peers.authToken ?? '').trim();
 const encoder = new TextEncoder();
+
+if (runtimeConfig.cache.provider === 'r2') {
+  console.warn(
+    '[bit-relay] RELAY_CACHE_PROVIDER=r2 is not yet supported in deno_main; using memory cache',
+  );
+}
 
 function withRelayAuthHeaders(headersInit?: HeadersInit): Headers {
   const headers = new Headers(headersInit);
@@ -218,9 +227,41 @@ function extractSessionToken(request: Request): string {
     '';
 }
 
+async function handleGitRelayRequest(args: {
+  request: Request;
+  sessionId: string;
+  gitSubPath: string;
+}): Promise<Response> {
+  const { request, sessionId, gitSubPath } = args;
+  const cacheKey = await buildGitCacheKeyFromRequest(request.clone(), sessionId, `/${gitSubPath}`);
+  const cached = await readGitCache(gitCacheStore, cacheKey);
+  const session = gitServeSessions.get(sessionId);
+  if (!session) {
+    if (cached) return cached;
+    return Response.json({ ok: false, error: 'session not found' }, { status: 404 });
+  }
+
+  const sessionUrl = new URL(request.url);
+  sessionUrl.pathname = `/git/${gitSubPath}`;
+  const sessionRequest = new Request(sessionUrl.toString(), request);
+  const response = await session.fetch(sessionRequest);
+
+  if (response.status === 200) {
+    await writeGitCache(gitCacheStore, cacheKey, response);
+    return response;
+  }
+
+  if (cached && (response.status === 404 || response.status === 410)) {
+    return cached;
+  }
+
+  return response;
+}
+
 async function handleRequest(request: Request): Promise<Response> {
   const url = new URL(request.url);
   const pathname = url.pathname;
+  let namedGitFallback: { sessionId: string; gitSubPath: string } | null = null;
 
   const adminResponse = await adminGitHubApi.handle(request);
   if (adminResponse) return adminResponse;
@@ -233,27 +274,32 @@ async function handleRequest(request: Request): Promise<Response> {
   if (namedGitMatch) {
     const candidateId = `${namedGitMatch[1]}/${namedGitMatch[2]}`;
     if (gitServeSessions.has(candidateId)) {
-      const session = gitServeSessions.get(candidateId)!;
-      const sessionUrl = new URL(request.url);
-      sessionUrl.pathname = '/git/' + namedGitMatch[3];
-      const sessionRequest = new Request(sessionUrl.toString(), request);
-      return session.fetch(sessionRequest);
+      return handleGitRelayRequest({
+        request,
+        sessionId: candidateId,
+        gitSubPath: namedGitMatch[3],
+      });
     }
+    namedGitFallback = { sessionId: candidateId, gitSubPath: namedGitMatch[3] };
     // fallthrough: try as random ID
   }
 
   // 2. Random session: /git/randomId/path...
   const randomGitMatch = pathname.match(/^\/git\/([A-Za-z0-9]{6,16})\/(.*)/);
   if (randomGitMatch) {
-    const sessionId = randomGitMatch[1];
-    const session = gitServeSessions.get(sessionId);
-    if (!session) {
-      return Response.json({ ok: false, error: 'session not found' }, { status: 404 });
-    }
-    const sessionUrl = new URL(request.url);
-    sessionUrl.pathname = '/git/' + randomGitMatch[2];
-    const sessionRequest = new Request(sessionUrl.toString(), request);
-    return session.fetch(sessionRequest);
+    return handleGitRelayRequest({
+      request,
+      sessionId: randomGitMatch[1],
+      gitSubPath: randomGitMatch[2],
+    });
+  }
+
+  if (namedGitFallback) {
+    return handleGitRelayRequest({
+      request,
+      sessionId: namedGitFallback.sessionId,
+      gitSubPath: namedGitFallback.gitSubPath,
+    });
   }
 
   // Serve API routes
