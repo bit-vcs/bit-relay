@@ -194,7 +194,7 @@
 - [x] Red: ref 受信 -> dispatch 呼び出しテスト
 - [x] Red: CI callback 受信 -> 状態遷移テスト
 - [x] Green: trigger + callback 実装
-- [ ] Refactor: trigger rule を設定駆動化
+- [x] Refactor: trigger rule を設定駆動化
 
 ### 完了条件
 

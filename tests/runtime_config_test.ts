@@ -14,6 +14,8 @@ Deno.test('parseRelayRuntimeConfigFromEnv returns defaults', () => {
   assertEquals(config.cache.provider, 'memory');
   assertEquals(config.peers.urls, []);
   assertEquals(config.trigger.webhookUrl, null);
+  assertEquals(config.trigger.eventType, 'relay.incoming_ref');
+  assertEquals(config.trigger.refPrefixes, ['refs/relay/incoming/']);
   assertEquals(config.gitServe.sessionTtlSec, null);
 });
 
@@ -55,6 +57,8 @@ Deno.test('parseRelayRuntimeConfigFromEnv applies RELAY_CONFIG_JSON override', (
         trigger: {
           webhook_url: 'https://ci.example/hook',
           webhook_token: 'token-1',
+          event_type: 'relay.custom_ref',
+          ref_prefixes: ['refs/custom/incoming/', 'refs/relay/incoming/'],
         },
         git_serve: {
           session_ttl_sec: 600,
@@ -76,5 +80,19 @@ Deno.test('parseRelayRuntimeConfigFromEnv applies RELAY_CONFIG_JSON override', (
   assertEquals(config.peers.syncIntervalSec, 12);
   assertEquals(config.trigger.webhookUrl, 'https://ci.example/hook');
   assertEquals(config.trigger.webhookToken, 'token-1');
+  assertEquals(config.trigger.eventType, 'relay.custom_ref');
+  assertEquals(config.trigger.refPrefixes, ['refs/custom/incoming/', 'refs/relay/incoming/']);
   assertEquals(config.gitServe.sessionTtlSec, 600);
+});
+
+Deno.test('parseRelayRuntimeConfigFromEnv parses trigger rule env values', () => {
+  const config = parseRelayRuntimeConfigFromEnv(
+    envFrom({
+      RELAY_TRIGGER_EVENT_TYPE: 'relay.ref_received',
+      RELAY_TRIGGER_REF_PREFIXES: 'refs/custom/incoming/, refs/relay/incoming/',
+    }),
+  );
+
+  assertEquals(config.trigger.eventType, 'relay.ref_received');
+  assertEquals(config.trigger.refPrefixes, ['refs/custom/incoming/', 'refs/relay/incoming/']);
 });

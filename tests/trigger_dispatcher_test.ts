@@ -61,6 +61,31 @@ Deno.test('webhook trigger dispatcher skips non incoming refs', async () => {
   assertEquals(called, 0);
 });
 
+Deno.test('webhook trigger dispatcher supports custom ref prefixes', async () => {
+  let called = 0;
+  const dispatcher = createWebhookTriggerDispatcher({
+    webhookUrl: 'https://ci.example/hook',
+    refPrefixes: ['refs/custom/incoming/'],
+    fetchFn: async () => {
+      called += 1;
+      return new Response('{}', { status: 200 });
+    },
+  });
+
+  const skipped = await dispatcher.dispatchIncomingRef(
+    incomingRefEvent('refs/relay/incoming/ci-1'),
+  );
+  assertEquals(skipped.dispatched, false);
+  assertEquals(called, 0);
+
+  const accepted = await dispatcher.dispatchIncomingRef(
+    incomingRefEvent('refs/custom/incoming/ci-1'),
+  );
+  assertEquals(accepted.ok, true);
+  assertEquals(accepted.dispatched, true);
+  assertEquals(called, 1);
+});
+
 Deno.test('webhook trigger dispatcher returns error for non-2xx status', async () => {
   const dispatcher = createWebhookTriggerDispatcher({
     webhookUrl: 'https://ci.example/hook',

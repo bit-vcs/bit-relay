@@ -39,6 +39,8 @@ export interface RelayPeerConfig {
 export interface RelayTriggerConfig {
   webhookUrl: string | null;
   webhookToken: string | null;
+  eventType: string;
+  refPrefixes: string[];
 }
 
 export interface RelayGitServeConfig {
@@ -55,6 +57,8 @@ export interface RelayRuntimeConfig {
 }
 
 export type EnvGetter = (key: string) => string | undefined;
+const DEFAULT_TRIGGER_EVENT_TYPE = 'relay.incoming_ref';
+const DEFAULT_TRIGGER_REF_PREFIXES = ['refs/relay/incoming/'];
 
 function parsePositiveInt(raw: string | undefined, fallback: number): number {
   const value = Number.parseInt(raw ?? '', 10);
@@ -106,6 +110,47 @@ function parseCsvUrls(raw: string | undefined): string[] {
     if (value.length === 0) continue;
     dedupe.add(value);
   }
+  return [...dedupe];
+}
+
+function parseCsvList(raw: string | undefined): string[] {
+  if (typeof raw !== 'string' || raw.trim().length === 0) return [];
+  const dedupe = new Set<string>();
+  for (const candidate of raw.split(',')) {
+    const value = candidate.trim();
+    if (value.length === 0) continue;
+    dedupe.add(value);
+  }
+  return [...dedupe];
+}
+
+function parseStringArray(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  const dedupe = new Set<string>();
+  for (const entry of value) {
+    if (typeof entry !== 'string') continue;
+    const trimmed = entry.trim();
+    if (trimmed.length === 0) continue;
+    dedupe.add(trimmed);
+  }
+  return [...dedupe];
+}
+
+function normalizeTriggerEventType(raw: string | null | undefined): string {
+  const value = (raw ?? '').trim();
+  return value.length > 0 ? value : DEFAULT_TRIGGER_EVENT_TYPE;
+}
+
+function normalizeTriggerRefPrefixes(raw: string[] | null | undefined): string[] {
+  const source = Array.isArray(raw) ? raw : [];
+  const dedupe = new Set<string>();
+  for (const entry of source) {
+    if (typeof entry !== 'string') continue;
+    const trimmed = entry.trim();
+    if (trimmed.length === 0) continue;
+    dedupe.add(trimmed);
+  }
+  if (dedupe.size === 0) return [...DEFAULT_TRIGGER_REF_PREFIXES];
   return [...dedupe];
 }
 
@@ -209,15 +254,9 @@ function applyJsonOverride(
   const peers = asObject(rawJson.peers);
   if (peers) {
     const urlsRaw = readRaw(peers, 'urls', 'urls');
-    if (Array.isArray(urlsRaw)) {
-      const dedupe = new Set<string>();
-      for (const value of urlsRaw) {
-        if (typeof value !== 'string') continue;
-        const trimmed = value.trim();
-        if (trimmed.length === 0) continue;
-        dedupe.add(trimmed);
-      }
-      config.peers.urls = [...dedupe];
+    const urls = parseStringArray(urlsRaw);
+    if (urls !== null) {
+      config.peers.urls = urls;
     }
     const syncIntervalSec = asPositiveInt(readRaw(peers, 'sync_interval_sec', 'syncIntervalSec'));
     if (syncIntervalSec !== null) config.peers.syncIntervalSec = syncIntervalSec;
@@ -231,6 +270,10 @@ function applyJsonOverride(
     if (webhookUrl !== null) config.trigger.webhookUrl = webhookUrl;
     const webhookToken = asString(readRaw(trigger, 'webhook_token', 'webhookToken'));
     if (webhookToken !== null) config.trigger.webhookToken = webhookToken;
+    const eventType = asString(readRaw(trigger, 'event_type', 'eventType'));
+    if (eventType !== null) config.trigger.eventType = normalizeTriggerEventType(eventType);
+    const refPrefixes = parseStringArray(readRaw(trigger, 'ref_prefixes', 'refPrefixes'));
+    if (refPrefixes !== null) config.trigger.refPrefixes = normalizeTriggerRefPrefixes(refPrefixes);
   }
 
   const gitServe = asObject(readRaw(rawJson, 'git_serve', 'gitServe'));
@@ -297,6 +340,8 @@ export function parseMemoryRelayOptionsFromEnv(getEnv: EnvGetter): MemoryRelayOp
 export function parseRelayRuntimeConfigFromEnv(getEnv: EnvGetter): RelayRuntimeConfig {
   const peersFromJson = parsePeersJson(getEnv('RELAY_PEERS_JSON'));
   const peersFromCsv = parseCsvUrls(getEnv('RELAY_PEERS'));
+  const triggerRefPrefixesFromCsv = parseCsvList(getEnv('RELAY_TRIGGER_REF_PREFIXES'));
+  const triggerEventType = normalizeTriggerEventType(parseOptionalString(getEnv('RELAY_TRIGGER_EVENT_TYPE')));
 
   const base: RelayRuntimeConfig = {
     relay: parseMemoryRelayOptionsFromEnv(getEnv),
@@ -325,6 +370,8 @@ export function parseRelayRuntimeConfigFromEnv(getEnv: EnvGetter): RelayRuntimeC
     trigger: {
       webhookUrl: parseOptionalString(getEnv('RELAY_TRIGGER_WEBHOOK_URL')),
       webhookToken: parseOptionalString(getEnv('RELAY_TRIGGER_WEBHOOK_TOKEN')),
+      eventType: triggerEventType,
+      refPrefixes: normalizeTriggerRefPrefixes(triggerRefPrefixesFromCsv),
     },
     gitServe: {
       sessionTtlSec: parseOptionalPositiveInt(getEnv('GIT_SERVE_SESSION_TTL_SEC')),

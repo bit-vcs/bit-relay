@@ -11,7 +11,7 @@ import {
   safeReadGitCache,
   safeWriteGitCache,
 } from './git_cache_layer.ts';
-import { createWebhookTriggerDispatcher, isIncomingRelayRef } from './trigger_dispatcher.ts';
+import { createWebhookTriggerDispatcher } from './trigger_dispatcher.ts';
 
 function parsePositiveInt(raw: string | undefined, fallback: number): number {
   const value = Number.parseInt(raw ?? '', 10);
@@ -72,6 +72,8 @@ const encoder = new TextEncoder();
 const triggerDispatcher = createWebhookTriggerDispatcher({
   webhookUrl: runtimeConfig.trigger.webhookUrl,
   webhookToken: runtimeConfig.trigger.webhookToken,
+  eventType: runtimeConfig.trigger.eventType,
+  refPrefixes: runtimeConfig.trigger.refPrefixes,
   fetchFn: fetch,
 });
 
@@ -226,8 +228,8 @@ function getOrCreateSession(sessionId: string): ReturnType<typeof createGitServe
       eventTarget: `session:${sessionId}`,
       onIncomingRef(event) {
         logRelayEvent(event);
-        if (!isIncomingRelayRef(event.ref)) return;
         void triggerDispatcher.dispatchIncomingRef(event).then((result) => {
+          if (!result.dispatched) return;
           if (!result.ok) {
             console.warn(
               `[bit-relay] trigger dispatch failed: ref=${event.ref}, status=${result.status}, error=${

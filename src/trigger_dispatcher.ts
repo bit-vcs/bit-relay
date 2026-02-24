@@ -15,13 +15,28 @@ export interface WebhookTriggerDispatcherOptions {
   webhookUrl: string | null;
   webhookToken?: string | null;
   eventType?: string;
+  refPrefixes?: string[];
   fetchFn?: typeof globalThis.fetch;
 }
 
-const INCOMING_REF_PREFIX = 'refs/relay/incoming/';
+const DEFAULT_REF_PREFIXES = ['refs/relay/incoming/'];
 
-export function isIncomingRelayRef(ref: string): boolean {
-  return ref.startsWith(INCOMING_REF_PREFIX);
+function normalizeRefPrefixes(raw: string[] | undefined): string[] {
+  const source = Array.isArray(raw) ? raw : [];
+  const dedupe = new Set<string>();
+  for (const entry of source) {
+    if (typeof entry !== 'string') continue;
+    const trimmed = entry.trim();
+    if (trimmed.length === 0) continue;
+    dedupe.add(trimmed);
+  }
+  if (dedupe.size === 0) return [...DEFAULT_REF_PREFIXES];
+  return [...dedupe];
+}
+
+export function isIncomingRelayRef(ref: string, refPrefixes?: string[]): boolean {
+  const prefixes = normalizeRefPrefixes(refPrefixes);
+  return prefixes.some((prefix) => ref.startsWith(prefix));
 }
 
 export function createWebhookTriggerDispatcher(
@@ -31,10 +46,11 @@ export function createWebhookTriggerDispatcher(
   const webhookUrl = (options.webhookUrl ?? '').trim();
   const webhookToken = (options.webhookToken ?? '').trim();
   const eventType = (options.eventType ?? 'relay.incoming_ref').trim() || 'relay.incoming_ref';
+  const refPrefixes = normalizeRefPrefixes(options.refPrefixes);
 
   return {
     async dispatchIncomingRef(event: IncomingRefRelayEvent): Promise<TriggerDispatchResult> {
-      if (!isIncomingRelayRef(event.ref) || webhookUrl.length === 0) {
+      if (!isIncomingRelayRef(event.ref, refPrefixes) || webhookUrl.length === 0) {
         return { ok: true, dispatched: false, status: 0 };
       }
 
