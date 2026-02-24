@@ -205,7 +205,7 @@
 
 ## 横断 TODO（品質・運用）
 
-- [ ] テスト階層を固定: contract / unit / integration / e2e
+- [x] テスト階層を固定: contract / unit / integration / e2e
 - [ ] `just test` に新規テストを統合（失敗時に原因が追える粒度）
 - [ ] 負荷計測シナリオを追加（multi-relay + cache hit/miss + issue sync）
 - [ ] 監査ログとメトリクス（成功率、レイテンシ、再試行回数）を追加

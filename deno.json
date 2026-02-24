@@ -4,6 +4,11 @@
   },
   "tasks": {
     "test": "deno test --allow-net --allow-env",
+    "test:layer": "deno run --allow-run tools/run_test_layer.ts",
+    "test:contract": "deno task test:layer contract",
+    "test:unit": "deno task test:layer unit",
+    "test:integration": "deno task test:layer integration",
+    "test:e2e": "deno task test:layer e2e",
     "dev": "deno run --allow-net --allow-env --watch src/deno_main.ts",
     "mcp": "deno run --allow-run --allow-net --allow-env --allow-read src/mcp_server.ts",
     "fmt": "deno fmt",
