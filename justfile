@@ -56,6 +56,9 @@ test-claim-watch target="http://localhost:8788":
 test-5agents target="http://localhost:8788":
   tools/test-5agents-claim.sh {{target}}
 
+test-multi-relay-mesh base_port="19081":
+  tools/test-multi-relay-mesh.sh {{base_port}}
+
 bench target="http://localhost:8788":
   k6 run --env BASE_URL={{target}} bench/run-all.js
 

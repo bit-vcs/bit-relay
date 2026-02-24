@@ -3,6 +3,8 @@
 bit-relay (Cloudflare Workers + Durable Objects) のスケーリング特性を k6
 ベンチマークで計測した結果をまとめる。
 
+集約版レポート: [performance-reports.md](./performance-reports.md)
+
 2026-02-24 に、multi-relay + issue cache sync のベンチシナリオを追加した。
 
 ## 計測環境

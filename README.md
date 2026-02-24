@@ -295,9 +295,14 @@ just test-serve https://myapp.exe.dev
 
 ```bash
 just test
+
+# 実機メッシュ検証（3ノードをローカル起動して伝搬確認）
+just test-multi-relay-mesh 19081
 ```
 
 ## Benchmark
+
+レポートは [docs/performance-reports.md](./docs/performance-reports.md) を参照。
 
 ```bash
 # 全シナリオ
