@@ -202,6 +202,12 @@ bit relay sync push relay+https://bit-relay.mizchi.workers.dev
 | `relay+http://host`     | relay API を直接使用（非 TLS、ローカル開発用） |
 | `https://host/repo.git` | smart-http を試行、404 時に relay fallback     |
 
+## CI トリガーフロー（Incoming Ref）
+
+`refs/relay/incoming/...` の受信、webhook 発火、callback/result API の仕様は以下を参照:
+
+- [CI トリガー仕様](./ci-trigger-spec-ja.md)
+
 ## 運用者向け API（キャッシュ/同期）
 
 relay 運用者向けに、issue キャッシュと relay 間交換の確認 API を用意している。

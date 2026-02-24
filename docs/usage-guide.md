@@ -206,6 +206,12 @@ Once verified, relay sessions use named paths (e.g., `alice/my-repo`) instead of
 | `relay+http://host`     | Use relay API directly (no TLS, for local dev)  |
 | `https://host/repo.git` | Try smart-http first, fall back to relay on 404 |
 
+## CI Trigger Flow (Incoming Ref)
+
+For the spec of `refs/relay/incoming/...` handling, webhook dispatch, and callback/result APIs, see:
+
+- [CI Trigger Specification](./ci-trigger-spec.md)
+
 ## Full Workflow: Alice and Bob
 
 ### Alice (Host)
