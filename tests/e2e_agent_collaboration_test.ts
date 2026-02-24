@@ -111,6 +111,23 @@ async function getPresence(
   return body.participants;
 }
 
+async function waitForPresenceCount(
+  relay: ReturnType<typeof createRelay>,
+  room: string,
+  expectedCount: number,
+  timeoutMs: number,
+): Promise<Array<{ participant_id: string; status: string; metadata: unknown }>> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() <= deadline) {
+    const participants = await getPresence(relay, room);
+    if (participants.length === expectedCount) {
+      return participants;
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return getPresence(relay, room);
+}
+
 // deno-lint-ignore no-unused-vars
 async function deletePresence(
   relay: ReturnType<typeof createRelay>,
@@ -464,11 +481,9 @@ Deno.test('presence TTL expiry — agent crash simulation', async () => {
   await new Promise((r) => setTimeout(r, 1100));
   await heartbeat(relay, room, 'agent-B');
 
-  // Wait for A's TTL to fully expire
-  await new Promise((r) => setTimeout(r, 1100));
-
-  // Check presence — A should be gone, B should still be present
-  const presence = await getPresence(relay, room);
+  // Wait for A's TTL to fully expire and be reaped.
+  // Use bounded polling to avoid timing flakiness around second boundaries.
+  const presence = await waitForPresenceCount(relay, room, 1, 2500);
   assertEquals(presence.length, 1);
   assertEquals(presence[0].participant_id, 'agent-B');
 

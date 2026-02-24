@@ -1,9 +1,12 @@
+import type { IncomingRefRelayEvent } from './contracts.ts';
+
 interface PendingGitRequest {
   requestId: string;
   method: string;
   path: string;
   headers: Record<string, string>;
   bodyBase64: string | null;
+  incomingRefs: string[];
   resolve: (response: Response) => void;
   timeoutId: ReturnType<typeof setTimeout>;
   createdAt: number;
@@ -28,7 +31,13 @@ export const DEFAULT_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 
 export interface GitServeSessionOptions {
   sessionTtlMs?: number;
+  onIncomingRef?: (event: IncomingRefRelayEvent) => void;
+  eventSource?: string;
+  eventTarget?: string;
+  eventRoom?: string;
 }
+
+const INCOMING_REF_PATTERN = /refs\/relay\/incoming\/[A-Za-z0-9._/-]{1,255}/g;
 
 function generateRequestId(): string {
   return crypto.randomUUID();
@@ -61,6 +70,20 @@ function fromBase64(b64: string): Uint8Array {
   return bytes;
 }
 
+function extractIncomingRefs(bodyBytes: Uint8Array): string[] {
+  const decoded = new TextDecoder().decode(bodyBytes);
+  const matches = decoded.match(INCOMING_REF_PATTERN);
+  if (!matches || matches.length === 0) return [];
+  const seen = new Set<string>();
+  const refs: string[] = [];
+  for (const ref of matches) {
+    if (seen.has(ref)) continue;
+    seen.add(ref);
+    refs.push(ref);
+  }
+  return refs;
+}
+
 export interface PersistableSessionState {
   active: boolean;
   sessionToken: string;
@@ -84,6 +107,25 @@ export function createGitServeSession(options?: GitServeSessionOptions): {
   };
 
   let sessionTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function emitIncomingRefEvents(incomingRefs: string[]): void {
+    if (!options?.onIncomingRef || incomingRefs.length === 0) return;
+    const nowSec = Math.floor(Date.now() / 1000);
+    const source = options.eventSource ?? 'git_serve_session';
+    const target = options.eventTarget ?? 'git-receive-pack';
+    const room = options.eventRoom ?? 'main';
+    for (const ref of incomingRefs) {
+      options.onIncomingRef({
+        type: 'incoming_ref',
+        eventId: crypto.randomUUID(),
+        occurredAt: nowSec,
+        room,
+        source,
+        ref,
+        target,
+      });
+    }
+  }
 
   function cleanup(): void {
     if (sessionTimer !== null) {
@@ -175,10 +217,16 @@ export function createGitServeSession(options?: GitServeSessionOptions): {
 
     const requestId = generateRequestId();
     let bodyBase64: string | null = null;
+    let bodyBytes: Uint8Array | null = null;
     if (request.method === 'POST') {
-      const bodyBytes = new Uint8Array(await request.arrayBuffer());
+      bodyBytes = new Uint8Array(await request.arrayBuffer());
       bodyBase64 = toBase64(bodyBytes);
     }
+    const incomingRefs = request.method === 'POST' && gitPath.endsWith('/git-receive-pack') &&
+        bodyBytes !== null
+      ? extractIncomingRefs(bodyBytes)
+      : [];
+    emitIncomingRefEvents(incomingRefs);
 
     const headers: Record<string, string> = {};
     for (const [key, value] of request.headers.entries()) {
@@ -215,6 +263,7 @@ export function createGitServeSession(options?: GitServeSessionOptions): {
         path: fullPath,
         headers,
         bodyBase64,
+        incomingRefs,
         resolve,
         timeoutId,
         createdAt: Date.now(),
@@ -267,6 +316,7 @@ export function createGitServeSession(options?: GitServeSessionOptions): {
         path: r.path,
         headers: r.headers,
         body_base64: r.bodyBase64,
+        incoming_refs: r.incomingRefs,
       })),
     });
   }

@@ -259,6 +259,86 @@ Deno.test('POST git request carries body', async () => {
   }
 });
 
+Deno.test('git-receive-pack request exposes incoming_refs in poll response', async () => {
+  const session = createGitServeSession();
+  try {
+    const token = await registerSession(session);
+    const requestBody = [
+      '0000',
+      'refs/heads/main',
+      'refs/relay/incoming/ci-123',
+      'refs/relay/incoming/review/42',
+    ].join('\n');
+
+    const gitRequestPromise = session.fetch(
+      new Request(`http://do/git/git-receive-pack?session_token=${token}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-git-receive-pack-request' },
+        body: requestBody,
+      }),
+    );
+
+    await new Promise((r) => setTimeout(r, 10));
+
+    const pollRes = await session.fetch(
+      new Request(`http://do/poll?timeout=1&session_token=${token}`),
+    );
+    const pollBody = await pollRes.json();
+    assertEquals(pollBody.requests.length, 1);
+    assertEquals(pollBody.requests[0].path, '/git-receive-pack');
+    assertEquals(pollBody.requests[0].incoming_refs, [
+      'refs/relay/incoming/ci-123',
+      'refs/relay/incoming/review/42',
+    ]);
+
+    await session.fetch(
+      new Request(`http://do/respond?session_token=${token}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          request_id: pollBody.requests[0].request_id,
+          status: 200,
+          headers: {},
+        }),
+      }),
+    );
+
+    const gitRes = await gitRequestPromise;
+    assertEquals(gitRes.status, 200);
+  } finally {
+    session.cleanup();
+  }
+});
+
+Deno.test('git-receive-pack can emit incoming_ref events via callback', async () => {
+  const seenRefs: string[] = [];
+  const session = createGitServeSession({
+    onIncomingRef(event) {
+      seenRefs.push(event.ref);
+    },
+  });
+
+  try {
+    const token = await registerSession(session);
+
+    const pending = session.fetch(
+      new Request(`http://do/git/git-receive-pack?session_token=${token}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-git-receive-pack-request' },
+        body: 'refs/relay/incoming/ci-999\nrefs/relay/incoming/ci-999',
+      }),
+    );
+
+    await new Promise((r) => setTimeout(r, 10));
+    session.cleanup();
+    await pending;
+
+    assertEquals(seenRefs, ['refs/relay/incoming/ci-999']);
+  } finally {
+    session.cleanup();
+  }
+});
+
 Deno.test('cleanup resolves pending requests with 410', async () => {
   const session = createGitServeSession();
   const token = await registerSession(session);

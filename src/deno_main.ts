@@ -1,18 +1,8 @@
-import {
-  createMemoryRelayService,
-  DEFAULT_IP_PUBLISH_LIMIT_PER_WINDOW,
-  DEFAULT_MAX_MESSAGES_PER_ROOM,
-  DEFAULT_MAX_WS_SESSIONS,
-  DEFAULT_PRESENCE_TTL_SEC,
-  DEFAULT_PUBLISH_LIMIT_PER_WINDOW,
-  DEFAULT_PUBLISH_PAYLOAD_MAX_BYTES,
-  DEFAULT_PUBLISH_WINDOW_MS,
-  DEFAULT_ROOM_PUBLISH_LIMIT_PER_WINDOW,
-  DEFAULT_WS_IDLE_TIMEOUT_MS,
-  DEFAULT_WS_PING_INTERVAL_MS,
-  type MemoryRelayOptions,
-} from './memory_handler.ts';
+import { createMemoryRelayService } from './memory_handler.ts';
 import { createGitServeSession } from './git_serve_session.ts';
+import { logRelayAudit, logRelayEvent } from './relay_observability.ts';
+import { parseRelayRuntimeConfigFromEnv } from './runtime_config.ts';
+import { createAdminGitHubApi } from './admin_github_api.ts';
 
 function parsePositiveInt(raw: string | undefined, fallback: number): number {
   const value = Number.parseInt(raw ?? '', 10);
@@ -20,94 +10,6 @@ function parsePositiveInt(raw: string | undefined, fallback: number): number {
     return fallback;
   }
   return Math.trunc(value);
-}
-
-function parseRoomTokens(raw: string | undefined): Record<string, string> {
-  if (typeof raw !== 'string' || raw.trim().length === 0) {
-    return {};
-  }
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-      return {};
-    }
-    const out: Record<string, string> = {};
-    for (const [room, token] of Object.entries(parsed as Record<string, unknown>)) {
-      if (typeof token !== 'string') continue;
-      out[room] = token;
-    }
-    return out;
-  } catch {
-    return {};
-  }
-}
-
-function parseBoolean(raw: string | undefined, fallback: boolean): boolean {
-  if (typeof raw !== 'string') return fallback;
-  const value = raw.trim().toLowerCase();
-  if (value === '1' || value === 'true' || value === 'yes' || value === 'on') return true;
-  if (value === '0' || value === 'false' || value === 'no' || value === 'off') return false;
-  return fallback;
-}
-
-function optionsFromEnv(): MemoryRelayOptions {
-  return {
-    authToken: Deno.env.get('BIT_RELAY_AUTH_TOKEN') ?? undefined,
-    maxMessagesPerRoom: parsePositiveInt(
-      Deno.env.get('RELAY_MAX_MESSAGES_PER_ROOM') ?? undefined,
-      DEFAULT_MAX_MESSAGES_PER_ROOM,
-    ),
-    publishPayloadMaxBytes: parsePositiveInt(
-      Deno.env.get('PUBLISH_PAYLOAD_MAX_BYTES') ?? undefined,
-      DEFAULT_PUBLISH_PAYLOAD_MAX_BYTES,
-    ),
-    publishLimitPerWindow: parsePositiveInt(
-      Deno.env.get('RELAY_PUBLISH_LIMIT_PER_WINDOW') ?? undefined,
-      DEFAULT_PUBLISH_LIMIT_PER_WINDOW,
-    ),
-    publishWindowMs: parsePositiveInt(
-      Deno.env.get('RELAY_PUBLISH_WINDOW_MS') ?? undefined,
-      DEFAULT_PUBLISH_WINDOW_MS,
-    ),
-    ipPublishLimitPerWindow: parsePositiveInt(
-      Deno.env.get('RELAY_IP_PUBLISH_LIMIT_PER_WINDOW') ?? undefined,
-      DEFAULT_IP_PUBLISH_LIMIT_PER_WINDOW,
-    ),
-    roomPublishLimitPerWindow: parsePositiveInt(
-      Deno.env.get('RELAY_ROOM_PUBLISH_LIMIT_PER_WINDOW') ?? undefined,
-      DEFAULT_ROOM_PUBLISH_LIMIT_PER_WINDOW,
-    ),
-    roomTokens: parseRoomTokens(Deno.env.get('RELAY_ROOM_TOKENS') ?? undefined),
-    maxWsSessions: parsePositiveInt(
-      Deno.env.get('MAX_WS_SESSIONS') ?? undefined,
-      DEFAULT_MAX_WS_SESSIONS,
-    ),
-    requireSignatures: parseBoolean(
-      Deno.env.get('RELAY_REQUIRE_SIGNATURE') ?? undefined,
-      true,
-    ),
-    maxClockSkewSec: parsePositiveInt(
-      Deno.env.get('RELAY_MAX_CLOCK_SKEW_SEC') ?? undefined,
-      300,
-    ),
-    nonceTtlSec: parsePositiveInt(Deno.env.get('RELAY_NONCE_TTL_SEC') ?? undefined, 600),
-    maxNoncesPerSender: parsePositiveInt(
-      Deno.env.get('RELAY_MAX_NONCES_PER_SENDER') ?? undefined,
-      2048,
-    ),
-    presenceTtlSec: parsePositiveInt(
-      Deno.env.get('RELAY_PRESENCE_TTL_SEC') ?? undefined,
-      DEFAULT_PRESENCE_TTL_SEC,
-    ),
-    wsPingIntervalMs: parsePositiveInt(
-      Deno.env.get('WS_PING_INTERVAL_SEC') ?? undefined,
-      DEFAULT_WS_PING_INTERVAL_MS / 1000,
-    ) * 1000,
-    wsIdleTimeoutMs: parsePositiveInt(
-      Deno.env.get('WS_IDLE_TIMEOUT_SEC') ?? undefined,
-      DEFAULT_WS_IDLE_TIMEOUT_MS / 1000,
-    ) * 1000,
-  };
 }
 
 const SESSION_ID_PATTERN = /^[A-Za-z0-9]{6,16}$/;
@@ -130,22 +32,38 @@ function generateSessionId(): string {
 
 const host = Deno.env.get('HOST') ?? '127.0.0.1';
 const port = parsePositiveInt(Deno.env.get('PORT') ?? undefined, 8788);
-const service = createMemoryRelayService(optionsFromEnv());
-
-const gitServeSessionTtlSec = parsePositiveInt(
-  Deno.env.get('GIT_SERVE_SESSION_TTL_SEC') ?? undefined,
-  0,
-);
-const gitServeSessionOptions = gitServeSessionTtlSec > 0
-  ? { sessionTtlMs: gitServeSessionTtlSec * 1000 }
+const runtimeConfig = parseRelayRuntimeConfigFromEnv((key) => Deno.env.get(key) ?? undefined);
+const service = createMemoryRelayService(runtimeConfig.relay);
+const adminGitHubApi = createAdminGitHubApi({
+  adminToken: Deno.env.get('RELAY_ADMIN_TOKEN') ?? runtimeConfig.relay.authToken,
+  defaultGitHubToken: runtimeConfig.github.token,
+  apiBaseUrl: runtimeConfig.github.apiBaseUrl,
+  audit(entry) {
+    logRelayAudit(entry);
+  },
+});
+const gitServeSessionOptions = runtimeConfig.gitServe.sessionTtlSec &&
+    runtimeConfig.gitServe.sessionTtlSec > 0
+  ? { sessionTtlMs: runtimeConfig.gitServe.sessionTtlSec * 1000 }
   : undefined;
 
 const gitServeSessions = new Map<string, ReturnType<typeof createGitServeSession>>();
 
+function nowEpochSec(): number {
+  return Math.floor(Date.now() / 1000);
+}
+
 function getOrCreateSession(sessionId: string): ReturnType<typeof createGitServeSession> {
   let session = gitServeSessions.get(sessionId);
   if (!session) {
-    session = createGitServeSession(gitServeSessionOptions);
+    session = createGitServeSession({
+      ...(gitServeSessionOptions ?? {}),
+      eventSource: `deno:${host}:${port}`,
+      eventTarget: `session:${sessionId}`,
+      onIncomingRef(event) {
+        logRelayEvent(event);
+      },
+    });
     gitServeSessions.set(sessionId, session);
   }
   return session;
@@ -161,6 +79,9 @@ function extractSessionToken(request: Request): string {
 async function handleRequest(request: Request): Promise<Response> {
   const url = new URL(request.url);
   const pathname = url.pathname;
+
+  const adminResponse = await adminGitHubApi.handle(request);
+  if (adminResponse) return adminResponse;
 
   // Git serve session routes: /git/<session_id>/...
   // 1. Named session: /git/owner/repo/path...
@@ -220,7 +141,20 @@ async function handleRequest(request: Request): Promise<Response> {
     const sessionRequest = new Request('http://localhost/register', { method: 'POST' });
     const result = await session.fetch(sessionRequest);
     const body = await result.json() as Record<string, unknown>;
-    return Response.json({ ...body, session_id: sessionId });
+    const response = Response.json({ ...body, session_id: sessionId });
+    logRelayAudit({
+      action: result.status === 200 ? 'serve.registered' : 'serve.register_failed',
+      occurredAt: nowEpochSec(),
+      status: result.status,
+      room: null,
+      sender: sender || null,
+      target: '/api/v1/serve/register',
+      id: sessionId,
+      detail: {
+        named_session: sessionId.includes('/'),
+      },
+    });
+    return response;
   }
 
   if (pathname === '/api/v1/serve/poll' && request.method === 'GET') {
@@ -283,17 +217,35 @@ async function handleRequest(request: Request): Promise<Response> {
   const response = await service.fetch(request);
 
   // Log state-changing operations
-  if (response.status === 200 && request.method === 'POST') {
+  if (request.method === 'POST') {
     const sender = url.searchParams.get('sender') ?? '';
     const room = url.searchParams.get('room') ?? '';
     if (pathname === '/api/v1/publish') {
       const topic = url.searchParams.get('topic') ?? 'notify';
       const id = url.searchParams.get('id') ?? '';
-      console.log(`[publish] room=${room} sender=${sender} topic=${topic} id=${id}`);
+      logRelayAudit({
+        action: response.status === 200 ? 'publish.accepted' : 'publish.rejected',
+        occurredAt: nowEpochSec(),
+        status: response.status,
+        room: room || null,
+        sender: sender || null,
+        target: pathname,
+        id: id || null,
+        detail: { topic },
+      });
     } else if (pathname === '/api/v1/review') {
       const prId = url.searchParams.get('pr_id') ?? '';
       const verdict = url.searchParams.get('verdict') ?? '';
-      console.log(`[review] room=${room} sender=${sender} pr_id=${prId} verdict=${verdict}`);
+      logRelayAudit({
+        action: response.status === 200 ? 'review.recorded' : 'review.rejected',
+        occurredAt: nowEpochSec(),
+        status: response.status,
+        room: room || null,
+        sender: sender || null,
+        target: pathname,
+        id: prId || null,
+        detail: { verdict },
+      });
     }
   }
 

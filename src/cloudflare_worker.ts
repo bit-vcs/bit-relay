@@ -1,23 +1,16 @@
 import {
   createMemoryRelayService,
-  DEFAULT_IP_PUBLISH_LIMIT_PER_WINDOW,
-  DEFAULT_MAX_MESSAGES_PER_ROOM,
-  DEFAULT_MAX_WS_SESSIONS,
-  DEFAULT_PRESENCE_TTL_SEC,
-  DEFAULT_PUBLISH_LIMIT_PER_WINDOW,
-  DEFAULT_PUBLISH_PAYLOAD_MAX_BYTES,
-  DEFAULT_PUBLISH_WINDOW_MS,
   DEFAULT_ROOM,
-  DEFAULT_ROOM_PUBLISH_LIMIT_PER_WINDOW,
-  DEFAULT_WS_IDLE_TIMEOUT_MS,
-  DEFAULT_WS_PING_INTERVAL_MS,
   healthResponse,
-  isValidRoomName,
   type IdentitySnapshot,
+  isValidRoomName,
   type MemoryRelayOptions,
   type MemoryRelayService,
 } from './memory_handler.ts';
 import { GitServeSession } from './git_serve_session.ts';
+import { logRelayAudit } from './relay_observability.ts';
+import { parseMemoryRelayOptionsFromEnv } from './runtime_config.ts';
+import { createAdminGitHubApi } from './admin_github_api.ts';
 
 interface DurableObjectStubLike {
   fetch(request: Request): Promise<Response>;
@@ -59,84 +52,37 @@ export interface RelayWorkerEnv {
   WS_PING_INTERVAL_SEC?: string;
   WS_IDLE_TIMEOUT_SEC?: string;
   GIT_SERVE_SESSION_TTL_SEC?: string;
+  RELAY_ADMIN_TOKEN?: string;
+  RELAY_GITHUB_TOKEN?: string;
+  RELAY_GITHUB_API_BASE_URL?: string;
 }
 
 const IDENTITY_KEY = 'relay_identity_v1';
 let fallbackService: MemoryRelayService | null = null;
+let adminGitHubApi: ReturnType<typeof createAdminGitHubApi> | null = null;
 
-function parsePositiveInt(raw: string | undefined, fallback: number): number {
-  const value = Number.parseInt(raw ?? '', 10);
-  if (!Number.isFinite(value) || value <= 0) {
-    return fallback;
-  }
-  return Math.trunc(value);
-}
-
-function parseRoomTokens(raw: string | undefined): Record<string, string> {
-  if (typeof raw !== 'string' || raw.trim().length === 0) {
-    return {};
-  }
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-      return {};
-    }
-    const out: Record<string, string> = {};
-    for (const [room, token] of Object.entries(parsed as Record<string, unknown>)) {
-      if (typeof token !== 'string') continue;
-      out[room] = token;
-    }
-    return out;
-  } catch {
-    return {};
-  }
-}
-
-function parseBoolean(raw: string | undefined, fallback: boolean): boolean {
-  if (typeof raw !== 'string') return fallback;
-  const value = raw.trim().toLowerCase();
-  if (value === '1' || value === 'true' || value === 'yes' || value === 'on') return true;
-  if (value === '0' || value === 'false' || value === 'no' || value === 'off') return false;
-  return fallback;
+function nowEpochSec(): number {
+  return Math.floor(Date.now() / 1000);
 }
 
 function buildOptions(env: RelayWorkerEnv): MemoryRelayOptions {
-  return {
-    authToken: env.BIT_RELAY_AUTH_TOKEN,
-    maxMessagesPerRoom: parsePositiveInt(
-      env.RELAY_MAX_MESSAGES_PER_ROOM,
-      DEFAULT_MAX_MESSAGES_PER_ROOM,
-    ),
-    publishPayloadMaxBytes: parsePositiveInt(
-      env.PUBLISH_PAYLOAD_MAX_BYTES,
-      DEFAULT_PUBLISH_PAYLOAD_MAX_BYTES,
-    ),
-    publishLimitPerWindow: parsePositiveInt(
-      env.RELAY_PUBLISH_LIMIT_PER_WINDOW,
-      DEFAULT_PUBLISH_LIMIT_PER_WINDOW,
-    ),
-    publishWindowMs: parsePositiveInt(env.RELAY_PUBLISH_WINDOW_MS, DEFAULT_PUBLISH_WINDOW_MS),
-    ipPublishLimitPerWindow: parsePositiveInt(
-      env.RELAY_IP_PUBLISH_LIMIT_PER_WINDOW,
-      DEFAULT_IP_PUBLISH_LIMIT_PER_WINDOW,
-    ),
-    roomPublishLimitPerWindow: parsePositiveInt(
-      env.RELAY_ROOM_PUBLISH_LIMIT_PER_WINDOW,
-      DEFAULT_ROOM_PUBLISH_LIMIT_PER_WINDOW,
-    ),
-    roomTokens: parseRoomTokens(env.RELAY_ROOM_TOKENS),
-    maxWsSessions: parsePositiveInt(env.MAX_WS_SESSIONS, DEFAULT_MAX_WS_SESSIONS),
-    requireSignatures: parseBoolean(env.RELAY_REQUIRE_SIGNATURE, true),
-    maxClockSkewSec: parsePositiveInt(env.RELAY_MAX_CLOCK_SKEW_SEC, 300),
-    nonceTtlSec: parsePositiveInt(env.RELAY_NONCE_TTL_SEC, 600),
-    maxNoncesPerSender: parsePositiveInt(env.RELAY_MAX_NONCES_PER_SENDER, 2048),
-    presenceTtlSec: parsePositiveInt(env.RELAY_PRESENCE_TTL_SEC, DEFAULT_PRESENCE_TTL_SEC),
-    wsPingIntervalMs:
-      parsePositiveInt(env.WS_PING_INTERVAL_SEC, DEFAULT_WS_PING_INTERVAL_MS / 1000) *
-      1000,
-    wsIdleTimeoutMs: parsePositiveInt(env.WS_IDLE_TIMEOUT_SEC, DEFAULT_WS_IDLE_TIMEOUT_MS / 1000) *
-      1000,
-  };
+  return parseMemoryRelayOptionsFromEnv((key) => {
+    const value = env[key as keyof RelayWorkerEnv];
+    return typeof value === 'string' ? value : undefined;
+  });
+}
+
+function getAdminGitHubApi(env: RelayWorkerEnv): ReturnType<typeof createAdminGitHubApi> {
+  if (adminGitHubApi !== null) return adminGitHubApi;
+  adminGitHubApi = createAdminGitHubApi({
+    adminToken: env.RELAY_ADMIN_TOKEN ?? env.BIT_RELAY_AUTH_TOKEN,
+    defaultGitHubToken: env.RELAY_GITHUB_TOKEN ?? null,
+    apiBaseUrl: env.RELAY_GITHUB_API_BASE_URL ?? 'https://api.github.com',
+    audit(entry) {
+      logRelayAudit(entry);
+    },
+  });
+  return adminGitHubApi;
 }
 
 function isRelayRoute(pathname: string): boolean {
@@ -233,15 +179,25 @@ async function handleServeRoute(
         { status: 503 },
       );
     }
-    return stub
-      .fetch(new Request('http://do/register', { method: 'POST' }))
-      .then(async (doRes) => {
-        const body = (await doRes.json()) as Record<string, unknown>;
-        if (body.ok) {
-          return Response.json({ ...body, session_id: sessionId });
-        }
-        return Response.json(body, { status: doRes.status });
-      });
+    const doRes = await stub.fetch(new Request('http://do/register', { method: 'POST' }));
+    const body = (await doRes.json()) as Record<string, unknown>;
+    const status = body.ok ? 200 : doRes.status;
+    logRelayAudit({
+      action: status === 200 ? 'serve.registered' : 'serve.register_failed',
+      occurredAt: nowEpochSec(),
+      status,
+      room: null,
+      sender: sender || null,
+      target: '/api/v1/serve/register',
+      id: sessionId,
+      detail: {
+        named_session: sessionId.includes('/'),
+      },
+    });
+    if (body.ok) {
+      return Response.json({ ...body, session_id: sessionId });
+    }
+    return Response.json(body, { status: doRes.status });
   }
 
   const sessionParam = url.searchParams.get('session') ?? '';
@@ -346,7 +302,7 @@ export class RelayRoom {
         if (legacy && typeof legacy === 'object') {
           const legacyData = legacy as Record<string, unknown>;
           if (legacyData.keys_by_sender || legacyData.nonces_by_sender) {
-            this.service.restoreIdentity(legacyData as IdentitySnapshot);
+            this.service.restoreIdentity(legacyData as unknown as IdentitySnapshot);
           }
           // Clean up legacy key
           await this.state.storage.delete('relay_snapshot_v1');
@@ -388,6 +344,8 @@ export class RelayRoom {
 const worker = {
   async fetch(request: Request, env: RelayWorkerEnv): Promise<Response> {
     const url = new URL(request.url);
+    const adminResponse = await getAdminGitHubApi(env).handle(request);
+    if (adminResponse) return adminResponse;
     if (url.pathname === '/health') {
       return healthResponse();
     }
@@ -437,12 +395,74 @@ const worker = {
       if (fallbackService === null) {
         fallbackService = createMemoryRelayService(buildOptions(env));
       }
-      return fallbackService.fetch(request);
+      const response = await fallbackService.fetch(request);
+      if (request.method === 'POST') {
+        const sender = url.searchParams.get('sender') ?? '';
+        if (url.pathname === '/api/v1/publish') {
+          const topic = url.searchParams.get('topic') ?? 'notify';
+          const id = url.searchParams.get('id') ?? '';
+          logRelayAudit({
+            action: response.status === 200 ? 'publish.accepted' : 'publish.rejected',
+            occurredAt: nowEpochSec(),
+            status: response.status,
+            room,
+            sender: sender || null,
+            target: url.pathname,
+            id: id || null,
+            detail: { topic },
+          });
+        } else if (url.pathname === '/api/v1/review') {
+          const prId = url.searchParams.get('pr_id') ?? '';
+          const verdict = url.searchParams.get('verdict') ?? '';
+          logRelayAudit({
+            action: response.status === 200 ? 'review.recorded' : 'review.rejected',
+            occurredAt: nowEpochSec(),
+            status: response.status,
+            room,
+            sender: sender || null,
+            target: url.pathname,
+            id: prId || null,
+            detail: { verdict },
+          });
+        }
+      }
+      return response;
     }
 
     const id = env.RELAY_ROOM.idFromName(room);
     const stub = env.RELAY_ROOM.get(id);
-    return stub.fetch(request);
+    const response = await stub.fetch(request);
+    if (request.method === 'POST') {
+      const sender = url.searchParams.get('sender') ?? '';
+      if (url.pathname === '/api/v1/publish') {
+        const topic = url.searchParams.get('topic') ?? 'notify';
+        const idValue = url.searchParams.get('id') ?? '';
+        logRelayAudit({
+          action: response.status === 200 ? 'publish.accepted' : 'publish.rejected',
+          occurredAt: nowEpochSec(),
+          status: response.status,
+          room,
+          sender: sender || null,
+          target: url.pathname,
+          id: idValue || null,
+          detail: { topic },
+        });
+      } else if (url.pathname === '/api/v1/review') {
+        const prId = url.searchParams.get('pr_id') ?? '';
+        const verdict = url.searchParams.get('verdict') ?? '';
+        logRelayAudit({
+          action: response.status === 200 ? 'review.recorded' : 'review.rejected',
+          occurredAt: nowEpochSec(),
+          status: response.status,
+          room,
+          sender: sender || null,
+          target: url.pathname,
+          id: prId || null,
+          detail: { verdict },
+        });
+      }
+    }
+    return response;
   },
 };
 
