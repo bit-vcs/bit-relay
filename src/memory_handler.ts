@@ -8,6 +8,7 @@ import {
   verifyEd25519Signature,
 } from './signing.ts';
 import { fetchGitHubEd25519Keys, matchesGitHubKey } from './github_keys.ts';
+import type { CacheStore, CacheStoreObject } from './cache_store.ts';
 import {
   type CacheExchangeRecord,
   classifyCacheExchangeCollision,
@@ -178,6 +179,7 @@ export interface MemoryRelayOptions {
   peerRelayUrls?: string[];
   cacheExchangeMaxHops?: number;
   cacheExchangeMaxRecords?: number;
+  cacheStore?: CacheStore;
   fetchFn?: typeof globalThis.fetch;
 }
 
@@ -397,6 +399,41 @@ function sanitizeEnvelope(envelope: Envelope): JsonObject {
     sender: envelope.sender,
     topic: envelope.topic,
     payload: envelope.payload,
+  };
+}
+
+function isIssueTopic(topic: string): boolean {
+  return topic === 'issue' || topic.startsWith('issue.');
+}
+
+function parseCachedIssueEnvelope(value: CacheStoreObject): Envelope | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(value.body));
+  } catch {
+    return null;
+  }
+  if (!isObjectRecord(parsed)) return null;
+  const room = typeof parsed.room === 'string' ? parsed.room : '';
+  const id = typeof parsed.id === 'string' ? parsed.id : '';
+  const sender = typeof parsed.sender === 'string' ? parsed.sender : '';
+  const topic = typeof parsed.topic === 'string' ? parsed.topic : '';
+  const signature = typeof parsed.signature === 'string'
+    ? parsed.signature
+    : parsed.signature === null
+    ? null
+    : null;
+  if (!isJsonValue(parsed.payload)) return null;
+  if (!isValidRoomName(room)) return null;
+  if (!isValidTopic(topic)) return null;
+  if (id.trim().length === 0 || sender.trim().length === 0) return null;
+  return {
+    room,
+    id,
+    sender,
+    topic,
+    payload: parsed.payload,
+    signature,
   };
 }
 
@@ -894,6 +931,7 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
     1,
     Math.trunc(options.cacheExchangeMaxRecords ?? DEFAULT_CACHE_EXCHANGE_MAX_RECORDS),
   );
+  const cacheStore = options.cacheStore ?? null;
   const fetchFn = options.fetchFn ?? globalThis.fetch;
 
   const rooms = new Map<string, RoomState>();
@@ -928,6 +966,29 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
       hopCount,
       maxHops,
     });
+  }
+
+  async function persistEnvelopeToCache(envelope: Envelope): Promise<void> {
+    if (!cacheStore) return;
+    const kind = isIssueTopic(envelope.topic) ? 'issue' : 'object';
+    const key = `${envelope.room}/${envelope.id}`;
+    const payloadJson = canonicalizeJson(envelope.payload);
+    const payloadHash = await sha256Hex(payloadJson);
+    const body = new TextEncoder().encode(JSON.stringify(envelope));
+    try {
+      await cacheStore.put({
+        kind,
+        key,
+        body,
+        room: envelope.room,
+        ref: envelope.topic,
+        contentHash: payloadHash,
+        contentType: 'application/json',
+        updatedAt: nowEpochSec(),
+      });
+    } catch {
+      // Cache failures should not affect relay publish availability.
+    }
   }
 
   function reapDeadConnections(): void {
@@ -1240,6 +1301,7 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
         accepted += 1;
         broadcastPublish(roomState, incoming.room, result.envelope, result.body.cursor as number);
         recordCacheExchange(result.envelope, incoming.origin, incoming.hopCount, incoming.maxHops);
+        await persistEnvelopeToCache(result.envelope);
         continue;
       }
 
@@ -1264,6 +1326,57 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
       },
       { status: 200 },
     );
+  }
+
+  async function handleCacheIssuePull(request: Request, url: URL): Promise<Response> {
+    if (request.method !== 'GET') {
+      return methodNotAllowedResponse();
+    }
+    const room = normalizeRoom(url.searchParams.get('room'));
+    if (!isValidRoomName(room)) {
+      return invalidRoomResponse();
+    }
+    const roomTokenError = checkRoomToken(request, room);
+    if (roomTokenError) return roomTokenError;
+
+    const after = normalizeAfter(url.searchParams.get('after'), 0);
+    const limit = normalizeLimit(url.searchParams.get('limit'), 100);
+    if (!cacheStore) {
+      return Response.json({
+        ok: true,
+        room,
+        next_cursor: after,
+        envelopes: [],
+      }, { status: 200 });
+    }
+
+    const listed = await cacheStore.list({
+      kind: 'issue',
+      room,
+      limit,
+      cursor: String(after),
+    });
+
+    const envelopes: JsonObject[] = [];
+    for (const entry of listed.entries) {
+      const cached = await cacheStore.get('issue', entry.key);
+      if (!cached) continue;
+      const envelope = parseCachedIssueEnvelope(cached);
+      if (!envelope) continue;
+      if (envelope.room !== room) continue;
+      if (!isIssueTopic(envelope.topic)) continue;
+      envelopes.push(sanitizeEnvelope(envelope));
+    }
+
+    const nextCursor = listed.cursor === null
+      ? after + listed.entries.length
+      : Number.parseInt(listed.cursor, 10);
+    return Response.json({
+      ok: true,
+      room,
+      next_cursor: Number.isFinite(nextCursor) ? nextCursor : after + listed.entries.length,
+      envelopes,
+    }, { status: 200 });
   }
 
   function handleWebSocket(request: Request, room: string): Response {
@@ -1551,6 +1664,10 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
       return handleCacheExchangePush(request);
     }
 
+    if (pathname === '/api/v1/cache/issues/pull') {
+      return handleCacheIssuePull(request, url);
+    }
+
     if (pathname === '/ws') {
       const room = normalizeRoom(url.searchParams.get('room'));
       if (!isValidRoomName(room)) {
@@ -1671,6 +1788,7 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
       ) {
         broadcastPublish(roomState, room, result.envelope, result.body.cursor as number);
         recordCacheExchange(result.envelope, relayNodeId, 0, cacheExchangeMaxHops);
+        await persistEnvelopeToCache(result.envelope);
       }
       return Response.json(result.body, { status: result.status });
     }
