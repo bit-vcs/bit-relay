@@ -3,6 +3,8 @@ import { createGitServeSession } from './git_serve_session.ts';
 import { logRelayAudit, logRelayEvent } from './relay_observability.ts';
 import { parseRelayRuntimeConfigFromEnv } from './runtime_config.ts';
 import { createAdminGitHubApi } from './admin_github_api.ts';
+import { createCacheSyncWorker } from './cache_sync_worker.ts';
+import type { CacheExchangeEntry } from './cache_exchange.ts';
 
 function parsePositiveInt(raw: string | undefined, fallback: number): number {
   const value = Number.parseInt(raw ?? '', 10);
@@ -53,9 +55,144 @@ const gitServeSessionOptions = runtimeConfig.gitServe.sessionTtlSec &&
   : undefined;
 
 const gitServeSessions = new Map<string, ReturnType<typeof createGitServeSession>>();
+const relayAuthToken = (runtimeConfig.relay.authToken ?? '').trim();
+const peerSyncAuthToken = (runtimeConfig.peers.authToken ?? '').trim();
+const encoder = new TextEncoder();
+
+function withRelayAuthHeaders(headersInit?: HeadersInit): Headers {
+  const headers = new Headers(headersInit);
+  if (relayAuthToken.length > 0 && !headers.has('authorization')) {
+    headers.set('authorization', `Bearer ${relayAuthToken}`);
+  }
+  return headers;
+}
+
+function createInternalServiceRequest(url: string, init: RequestInit = {}): Request {
+  return new Request(url, {
+    ...init,
+    headers: withRelayAuthHeaders(init.headers),
+  });
+}
+
+function parseCacheExchangePullBody(body: Record<string, unknown>): {
+  entries: CacheExchangeEntry[];
+  nextCursor: number;
+} {
+  const entries = Array.isArray(body.entries) ? body.entries as CacheExchangeEntry[] : [];
+  const nextCursor = typeof body.next_cursor === 'number' && Number.isFinite(body.next_cursor)
+    ? Math.max(0, Math.trunc(body.next_cursor))
+    : 0;
+  return { entries, nextCursor };
+}
 
 function nowEpochSec(): number {
   return Math.floor(Date.now() / 1000);
+}
+
+async function resolveLocalRelayNodeId(): Promise<string> {
+  const response = await service.fetch(
+    createInternalServiceRequest('http://localhost/api/v1/cache/exchange/discovery', {
+      method: 'GET',
+    }),
+  );
+  if (response.status !== 200) {
+    throw new Error(`cache exchange discovery failed: status=${response.status}`);
+  }
+  const body = await response.json() as Record<string, unknown>;
+  const nodeId = typeof body.node_id === 'string' ? body.node_id.trim() : '';
+  if (nodeId.length === 0) {
+    throw new Error('cache exchange discovery did not return node_id');
+  }
+  return nodeId;
+}
+
+async function pushEntriesToLocal(entries: CacheExchangeEntry[]): Promise<Record<string, unknown>> {
+  const response = await service.fetch(
+    createInternalServiceRequest('http://localhost/api/v1/cache/exchange/push', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ entries }),
+    }),
+  );
+  if (response.status !== 200) {
+    const text = await response.text();
+    throw new Error(`local cache push failed: status=${response.status}, body=${text}`);
+  }
+  return await response.json() as Record<string, unknown>;
+}
+
+async function startCacheSyncWorker(): Promise<void> {
+  const peers = runtimeConfig.peers.urls;
+  if (peers.length === 0) return;
+
+  let localNodeId = '';
+  try {
+    localNodeId = await resolveLocalRelayNodeId();
+  } catch (error) {
+    console.error('[bit-relay] cache-sync disabled: failed to resolve local node id', error);
+    return;
+  }
+
+  const worker = createCacheSyncWorker({
+    peers,
+    limit: 200,
+    async pullFromPeer({ peer, after, limit }) {
+      const url = new URL('/api/v1/cache/exchange/pull', peer);
+      url.searchParams.set('after', String(after));
+      url.searchParams.set('limit', String(limit));
+      url.searchParams.set('peer', localNodeId);
+
+      const headers = new Headers();
+      if (peerSyncAuthToken.length > 0) {
+        headers.set('authorization', `Bearer ${peerSyncAuthToken}`);
+      }
+
+      const response = await fetch(url.toString(), {
+        method: 'GET',
+        headers,
+      });
+      if (response.status !== 200) {
+        const text = await response.text();
+        throw new Error(`peer pull failed: peer=${peer}, status=${response.status}, body=${text}`);
+      }
+      const body = await response.json() as Record<string, unknown>;
+      return parseCacheExchangePullBody(body);
+    },
+    async pushToLocal({ peer, entries }) {
+      const result = await pushEntriesToLocal(entries);
+      const accepted = typeof result.accepted === 'number' && Number.isFinite(result.accepted)
+        ? Math.max(0, Math.trunc(result.accepted))
+        : entries.length;
+      if (accepted > 0) {
+        logRelayEvent({
+          type: 'cache_replicated',
+          eventId: crypto.randomUUID(),
+          occurredAt: nowEpochSec(),
+          room: 'all',
+          source: `peer:${peer}`,
+          cacheKey: `cache.exchange.${accepted}`,
+          fromNode: peer,
+          toNode: localNodeId,
+          bytes: encoder.encode(JSON.stringify(entries)).byteLength,
+        });
+      }
+    },
+  });
+
+  const intervalMs = Math.max(1, runtimeConfig.peers.syncIntervalSec) * 1000;
+  const runOnce = async () => {
+    const summary = await worker.syncOnce();
+    if (summary.failedPeers.length > 0) {
+      console.error('[bit-relay] cache-sync failed peers:', summary.failedPeers.join(','));
+    }
+  };
+
+  await runOnce();
+  setInterval(() => {
+    void runOnce();
+  }, intervalMs);
 }
 
 function getOrCreateSession(sessionId: string): ReturnType<typeof createGitServeSession> {
@@ -127,7 +264,7 @@ async function handleRequest(request: Request): Promise<Response> {
 
     if (sender && repo) {
       const keyInfoRes = await service.fetch(
-        new Request(
+        createInternalServiceRequest(
           `http://localhost/api/v1/key/info?sender=${encodeURIComponent(sender)}`,
         ),
       );
@@ -258,5 +395,6 @@ async function handleRequest(request: Request): Promise<Response> {
 }
 
 console.log(`[bit-relay] listening on http://${host}:${port}`);
+void startCacheSyncWorker();
 
 Deno.serve({ hostname: host, port }, handleRequest);
