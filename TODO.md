@@ -68,11 +68,11 @@
 
 ### TDD
 
-- [ ] 探索: GitHub API 制約（権限、レート、失敗時リトライ）を fixture 化
+- [x] 探索: GitHub API 制約（権限、レート、失敗時リトライ）を fixture 化
 - [x] Red: adapter 単体テスト（成功/401/403/422/429）
-- [ ] Red: E2E（relay -> GitHub mock -> action dispatch）
+- [x] Red: E2E（relay -> GitHub mock -> action dispatch）
 - [x] Green: API 実装 + 認証ガード
-- [ ] Refactor: GitHub 呼び出しを transport 層へ分離
+- [x] Refactor: GitHub 呼び出しを transport 層へ分離
 
 ### 完了条件
 

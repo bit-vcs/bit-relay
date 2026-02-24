@@ -5,6 +5,7 @@ import type {
   RelayTargetRequest,
   RelayTargetResult,
 } from './contracts.ts';
+import { createGitHubTransport } from './github_transport.ts';
 
 export interface GitHubRelayTargetOptions {
   repo: string;
@@ -134,63 +135,19 @@ async function toResponseData(response: Response): Promise<JsonValue | undefined
   }
 }
 
-async function githubRequest(args: {
-  fetchFn: typeof globalThis.fetch;
-  apiBaseUrl: string;
-  token: string;
-  path: string;
-  method: 'POST' | 'PATCH';
-  body: Record<string, unknown>;
-}): Promise<Response> {
-  const url = new URL(args.path, args.apiBaseUrl);
-  return await args.fetchFn(url.toString(), {
-    method: args.method,
-    headers: {
-      'content-type': 'application/json',
-      accept: 'application/vnd.github+json',
-      authorization: `Bearer ${args.token}`,
-    },
-    body: JSON.stringify(args.body),
-  });
-}
-
-function shouldRetryStatus(status: number): boolean {
-  return status === 429 || status === 502 || status === 503 || status === 504;
-}
-
-async function githubRequestWithRetry(args: {
-  fetchFn: typeof globalThis.fetch;
-  apiBaseUrl: string;
-  token: string;
-  path: string;
-  method: 'POST' | 'PATCH';
-  body: Record<string, unknown>;
-  maxRetries: number;
-  retryDelayMs: number;
-  sleepFn: (ms: number) => Promise<void>;
-}): Promise<Response> {
-  let attempt = 0;
-  while (true) {
-    const response = await githubRequest(args);
-    if (!shouldRetryStatus(response.status) || attempt >= args.maxRetries) {
-      return response;
-    }
-    attempt += 1;
-    if (args.retryDelayMs > 0) {
-      await args.sleepFn(args.retryDelayMs * attempt);
-    }
-  }
-}
-
 export function createGitHubRelayTarget(options: GitHubRelayTargetOptions): RelayTarget {
-  const fetchFn = options.fetchFn ?? globalThis.fetch;
-  const apiBaseUrl = options.apiBaseUrl ?? 'https://api.github.com';
-  const maxRetries = options.maxRetries ?? 1;
-  const retryDelayMs = options.retryDelayMs ?? 0;
-  const sleepFn = options.sleepFn ??
-    ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const repo = options.repo;
   const token = options.token ?? null;
+  const transport = token
+    ? createGitHubTransport({
+      token,
+      apiBaseUrl: options.apiBaseUrl,
+      fetchFn: options.fetchFn,
+      maxRetries: options.maxRetries,
+      retryDelayMs: options.retryDelayMs,
+      sleepFn: options.sleepFn,
+    })
+    : null;
 
   return {
     kind: 'github_repository',
@@ -211,24 +168,15 @@ export function createGitHubRelayTarget(options: GitHubRelayTargetOptions): Rela
         if (request.auth.role === 'anonymous' || !hasScope(request.auth, 'github.repo.write')) {
           return unauthorizedResult('push', 'github push requires admin permissions');
         }
-        if (!token) return missingTokenResult('push');
+        if (!transport) return missingTokenResult('push');
         const payload = parsePushPayload(request.payload);
         if (!payload) return invalidPayloadResult('push', 'invalid push payload');
 
-        const ref = encodeURIComponent(`heads/${payload.branch}`);
-        const response = await githubRequestWithRetry({
-          fetchFn,
-          apiBaseUrl,
-          token,
-          path: `/repos/${repo}/git/refs/${ref}`,
-          method: 'PATCH',
-          body: {
-            sha: payload.sha,
-            force: payload.force,
-          },
-          maxRetries,
-          retryDelayMs,
-          sleepFn,
+        const response = await transport.updateRef({
+          repo,
+          branch: payload.branch,
+          sha: payload.sha,
+          force: payload.force,
         });
         const data = await toResponseData(response);
         return {
@@ -246,38 +194,21 @@ export function createGitHubRelayTarget(options: GitHubRelayTargetOptions): Rela
         ) {
           return unauthorizedResult('notify', 'github dispatch requires admin permissions');
         }
-        if (!token) return missingTokenResult('notify');
+        if (!transport) return missingTokenResult('notify');
         const payload = parseNotifyPayload(request.payload);
         if (!payload) return invalidPayloadResult('notify', 'invalid notify payload');
 
         const response = payload.kind === 'repository_dispatch'
-          ? await githubRequestWithRetry({
-            fetchFn,
-            apiBaseUrl,
-            token,
-            path: `/repos/${repo}/dispatches`,
-            method: 'POST',
-            body: {
-              event_type: payload.event_type,
-              client_payload: payload.client_payload,
-            },
-            maxRetries,
-            retryDelayMs,
-            sleepFn,
+          ? await transport.repositoryDispatch({
+            repo,
+            eventType: payload.event_type,
+            clientPayload: payload.client_payload,
           })
-          : await githubRequestWithRetry({
-            fetchFn,
-            apiBaseUrl,
-            token,
-            path: `/repos/${repo}/actions/workflows/${payload.workflow_id}/dispatches`,
-            method: 'POST',
-            body: {
-              ref: payload.ref,
-              inputs: payload.inputs,
-            },
-            maxRetries,
-            retryDelayMs,
-            sleepFn,
+          : await transport.workflowDispatch({
+            repo,
+            workflowId: payload.workflow_id,
+            ref: payload.ref,
+            inputs: payload.inputs,
           });
 
         const data = await toResponseData(response);
