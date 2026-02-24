@@ -162,7 +162,7 @@
 - [x] GitHub webhook 受信エンドポイント（`issues`, `issue_comment`, `label`）
 - [x] GitHub event -> bit issue event のマッピング定義
 - [x] idempotency key（`delivery_id`）で重複防止
-- [ ] 同期失敗時の DLQ / retry キュー
+- [x] 同期失敗時の DLQ / retry キュー
 
 ### TDD
 
@@ -175,7 +175,7 @@
 ### 完了条件
 
 - [x] GitHub issue 更新が bit issue へ反映される
-- [ ] 再送や順不同イベントでも破綻しない
+- [x] 再送や順不同イベントでも破綻しない
 
 ---
 

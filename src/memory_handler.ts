@@ -146,6 +146,22 @@ interface SnapshotCacheExchangeState {
   records: SnapshotCacheExchangeRecord[];
 }
 
+interface SnapshotGitHubWebhookDlqEntry {
+  delivery_id: string;
+  event: string;
+  body: string;
+  created_at: number;
+  updated_at: number;
+  retry_count: number;
+  next_retry_at: number;
+  last_error: string;
+}
+
+interface SnapshotGitHubWebhookState {
+  deliveries: Record<string, number>;
+  dlq: SnapshotGitHubWebhookDlqEntry[];
+}
+
 interface IssueCacheEventRecord {
   version: 1;
   kind: 'issue_event';
@@ -154,6 +170,7 @@ interface IssueCacheEventRecord {
   issue_id: string;
   action: string;
   envelope: Envelope;
+  source_updated_at_ms: number | null;
   updated_at: number;
 }
 
@@ -164,6 +181,7 @@ interface IssueCacheSnapshotRecord {
   issue_id: string;
   last_cursor: number;
   envelope: Envelope;
+  source_updated_at_ms: number | null;
   updated_at: number;
 }
 
@@ -175,12 +193,24 @@ interface IssueCacheCursorRecord {
   updated_at: number;
 }
 
+interface GitHubWebhookDlqEntry {
+  delivery_id: string;
+  event: string;
+  body: string;
+  created_at: number;
+  updated_at: number;
+  retry_count: number;
+  next_retry_at: number;
+  last_error: string;
+}
+
 export interface RelaySnapshot {
   rooms: Record<string, SnapshotRoom>;
   keys_by_sender: Record<string, SnapshotKeyRecord>;
   nonces_by_sender: Record<string, Record<string, number>>;
   cache_exchange?: SnapshotCacheExchangeState;
   issue_cursors?: Record<string, number>;
+  github_webhook?: SnapshotGitHubWebhookState;
 }
 
 export interface IdentitySnapshot {
@@ -241,6 +271,8 @@ const DEFAULT_WS_IDLE_TIMEOUT_MS = 90_000;
 const DEFAULT_CACHE_EXCHANGE_MAX_HOPS = 3;
 const DEFAULT_CACHE_EXCHANGE_MAX_RECORDS = 10_000;
 const MAX_GITHUB_WEBHOOK_DELIVERY_IDS = 10_000;
+const MAX_GITHUB_WEBHOOK_DLQ_ENTRIES = 10_000;
+const GITHUB_WEBHOOK_RETRY_BASE_SEC = 30;
 const ISSUE_EVENT_KEY_PREFIX = 'issue/events/';
 const ISSUE_SNAPSHOT_KEY_PREFIX = 'issue/snapshots/';
 const ISSUE_CURSOR_KEY_PREFIX = 'issue/cursors/';
@@ -555,6 +587,11 @@ function parseIssueCacheEventRecord(value: CacheStoreObject): IssueCacheEventRec
   const issueId = typeof parsed.issue_id === 'string' ? parsed.issue_id.trim() : '';
   const action = typeof parsed.action === 'string' ? parsed.action.trim() : '';
   const cursorRaw = typeof parsed.cursor === 'number' ? parsed.cursor : NaN;
+  const sourceUpdatedAtRaw = typeof parsed.source_updated_at_ms === 'number'
+    ? parsed.source_updated_at_ms
+    : parsed.source_updated_at_ms === null || parsed.source_updated_at_ms === undefined
+    ? null
+    : NaN;
   const updatedAtRaw = typeof parsed.updated_at === 'number' ? parsed.updated_at : NaN;
   const envelope = parseEnvelopeRecord(parsed.envelope);
   if (!envelope) return null;
@@ -564,6 +601,12 @@ function parseIssueCacheEventRecord(value: CacheStoreObject): IssueCacheEventRec
   if (envelope.room !== room) return null;
   const cursor = Math.trunc(cursorRaw);
   if (!Number.isFinite(cursor) || cursor <= 0) return null;
+  let sourceUpdatedAtMs: number | null = null;
+  if (sourceUpdatedAtRaw !== null) {
+    const normalized = Math.trunc(sourceUpdatedAtRaw);
+    if (!Number.isFinite(normalized) || normalized < 0) return null;
+    sourceUpdatedAtMs = normalized;
+  }
   const updatedAt = Math.trunc(updatedAtRaw);
   if (!Number.isFinite(updatedAt) || updatedAt < 0) return null;
   return {
@@ -574,6 +617,7 @@ function parseIssueCacheEventRecord(value: CacheStoreObject): IssueCacheEventRec
     issue_id: issueId,
     action,
     envelope,
+    source_updated_at_ms: sourceUpdatedAtMs,
     updated_at: updatedAt,
   };
 }
@@ -591,6 +635,11 @@ function parseIssueCacheSnapshotRecord(value: CacheStoreObject): IssueCacheSnaps
   const room = typeof parsed.room === 'string' ? parsed.room : '';
   const issueId = typeof parsed.issue_id === 'string' ? parsed.issue_id.trim() : '';
   const lastCursorRaw = typeof parsed.last_cursor === 'number' ? parsed.last_cursor : NaN;
+  const sourceUpdatedAtRaw = typeof parsed.source_updated_at_ms === 'number'
+    ? parsed.source_updated_at_ms
+    : parsed.source_updated_at_ms === null || parsed.source_updated_at_ms === undefined
+    ? null
+    : NaN;
   const updatedAtRaw = typeof parsed.updated_at === 'number' ? parsed.updated_at : NaN;
   const envelope = parseEnvelopeRecord(parsed.envelope);
   if (!envelope) return null;
@@ -599,6 +648,12 @@ function parseIssueCacheSnapshotRecord(value: CacheStoreObject): IssueCacheSnaps
   if (envelope.room !== room) return null;
   const lastCursor = Math.trunc(lastCursorRaw);
   if (!Number.isFinite(lastCursor) || lastCursor <= 0) return null;
+  let sourceUpdatedAtMs: number | null = null;
+  if (sourceUpdatedAtRaw !== null) {
+    const normalized = Math.trunc(sourceUpdatedAtRaw);
+    if (!Number.isFinite(normalized) || normalized < 0) return null;
+    sourceUpdatedAtMs = normalized;
+  }
   const updatedAt = Math.trunc(updatedAtRaw);
   if (!Number.isFinite(updatedAt) || updatedAt < 0) return null;
   return {
@@ -608,6 +663,7 @@ function parseIssueCacheSnapshotRecord(value: CacheStoreObject): IssueCacheSnaps
     issue_id: issueId,
     last_cursor: lastCursor,
     envelope,
+    source_updated_at_ms: sourceUpdatedAtMs,
     updated_at: updatedAt,
   };
 }
@@ -684,6 +740,17 @@ function readGitHubIssueNumber(payload: Record<string, unknown>): number | null 
   if (typeof raw !== 'number' || !Number.isFinite(raw)) return null;
   const value = Math.trunc(raw);
   return value > 0 ? value : null;
+}
+
+function readGitHubIssueUpdatedAtMs(payload: Record<string, unknown>): number | null {
+  if (!isObjectRecord(payload.issue)) return null;
+  if (typeof payload.issue.updated_at !== 'string') return null;
+  const updatedAt = payload.issue.updated_at.trim();
+  if (updatedAt.length === 0) return null;
+  const epochMs = Date.parse(updatedAt);
+  if (!Number.isFinite(epochMs)) return null;
+  const normalized = Math.trunc(epochMs);
+  return normalized >= 0 ? normalized : null;
 }
 
 function readGitHubSender(payload: Record<string, unknown>): string {
@@ -763,6 +830,7 @@ function buildGitHubIssuePayload(args: {
       title: typeof issue.title === 'string' ? issue.title : '',
       state: typeof issue.state === 'string' ? issue.state : '',
       html_url: typeof issue.html_url === 'string' ? issue.html_url : '',
+      updated_at: typeof issue.updated_at === 'string' ? issue.updated_at : '',
     };
   }
 
@@ -784,6 +852,25 @@ function buildGitHubIssuePayload(args: {
   }
 
   return payload;
+}
+
+function parseIssueSourceUpdatedAtMs(payload: JsonValue): number | null {
+  if (!isObjectRecord(payload)) return null;
+  if (
+    typeof payload.source_updated_at_ms === 'number' &&
+    Number.isFinite(payload.source_updated_at_ms)
+  ) {
+    const normalized = Math.trunc(payload.source_updated_at_ms);
+    if (normalized >= 0) return normalized;
+  }
+  if (!isObjectRecord(payload.issue)) return null;
+  if (typeof payload.issue.updated_at !== 'string') return null;
+  const raw = payload.issue.updated_at.trim();
+  if (raw.length === 0) return null;
+  const epochMs = Date.parse(raw);
+  if (!Number.isFinite(epochMs)) return null;
+  const normalized = Math.trunc(epochMs);
+  return normalized >= 0 ? normalized : null;
 }
 
 function parseAckIds(
@@ -1293,6 +1380,8 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
   const cacheExchangeRecords: CacheExchangeRecord[] = [];
   const issueCursorByRoom = new Map<string, number>();
   const githubWebhookDeliveryIds = new Map<string, number>();
+  const githubWebhookDlq = new Map<string, GitHubWebhookDlqEntry>();
+  const githubWebhookDlqOrder: string[] = [];
   let cacheExchangeCursor = 0;
   let lastReapAt = Date.now();
 
@@ -1334,6 +1423,76 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
       removed += 1;
       if (removed >= overflow) break;
     }
+  }
+
+  function computeGitHubWebhookNextRetryAt(nowSec: number, retryCount: number): number {
+    const exponential = Math.min(
+      3600,
+      GITHUB_WEBHOOK_RETRY_BASE_SEC * Math.max(1, 2 ** retryCount),
+    );
+    return nowSec + exponential;
+  }
+
+  function enqueueGitHubWebhookDlq(args: {
+    deliveryId: string;
+    event: string;
+    body: string;
+    error: string;
+    incrementRetry: boolean;
+  }): GitHubWebhookDlqEntry {
+    const nowSec = nowEpochSec();
+    const existing = githubWebhookDlq.get(args.deliveryId);
+    const retryCount = existing
+      ? existing.retry_count + (args.incrementRetry ? 1 : 0)
+      : (args.incrementRetry ? 1 : 0);
+    const entry: GitHubWebhookDlqEntry = {
+      delivery_id: args.deliveryId,
+      event: args.event,
+      body: args.body,
+      created_at: existing ? existing.created_at : nowSec,
+      updated_at: nowSec,
+      retry_count: retryCount,
+      next_retry_at: computeGitHubWebhookNextRetryAt(nowSec, retryCount),
+      last_error: args.error,
+    };
+    githubWebhookDlq.set(args.deliveryId, entry);
+    if (!existing) {
+      githubWebhookDlqOrder.push(args.deliveryId);
+    }
+    if (githubWebhookDlqOrder.length > MAX_GITHUB_WEBHOOK_DLQ_ENTRIES) {
+      const overflow = githubWebhookDlqOrder.length - MAX_GITHUB_WEBHOOK_DLQ_ENTRIES;
+      for (let i = 0; i < overflow; i += 1) {
+        const removedId = githubWebhookDlqOrder.shift();
+        if (!removedId) break;
+        githubWebhookDlq.delete(removedId);
+      }
+    }
+    return entry;
+  }
+
+  function removeGitHubWebhookDlq(deliveryId: string): void {
+    if (!githubWebhookDlq.delete(deliveryId)) return;
+    const index = githubWebhookDlqOrder.indexOf(deliveryId);
+    if (index >= 0) {
+      githubWebhookDlqOrder.splice(index, 1);
+    }
+  }
+
+  function listGitHubWebhookDlq(after: number, limit: number): {
+    entries: GitHubWebhookDlqEntry[];
+    nextCursor: number;
+  } {
+    const pageIds = githubWebhookDlqOrder.slice(after, after + limit);
+    const entries: GitHubWebhookDlqEntry[] = [];
+    for (const deliveryId of pageIds) {
+      const entry = githubWebhookDlq.get(deliveryId);
+      if (entry) entries.push(entry);
+    }
+    const next = after + pageIds.length;
+    return {
+      entries,
+      nextCursor: next < githubWebhookDlqOrder.length ? next : after + entries.length,
+    };
   }
 
   async function putCacheJsonObject(args: {
@@ -1403,6 +1562,7 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
     const issueCursor = await nextIssueCursor(envelope.room, roomCursorHint);
     const updatedAt = nowEpochSec();
     const action = deriveIssueAction(envelope);
+    const sourceUpdatedAtMs = parseIssueSourceUpdatedAtMs(envelope.payload);
 
     const issueEvent: IssueCacheEventRecord = {
       version: 1,
@@ -1412,6 +1572,7 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
       issue_id: issueId,
       action,
       envelope,
+      source_updated_at_ms: sourceUpdatedAtMs,
       updated_at: updatedAt,
     };
     await putCacheJsonObject({
@@ -1423,23 +1584,47 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
       updatedAt,
     });
 
-    const issueSnapshot: IssueCacheSnapshotRecord = {
-      version: 1,
-      kind: 'issue_snapshot',
-      room: envelope.room,
-      issue_id: issueId,
-      last_cursor: issueCursor,
-      envelope,
-      updated_at: updatedAt,
-    };
-    await putCacheJsonObject({
-      kind: 'object',
-      key: issueSnapshotStorageKey(envelope.room, issueId),
-      room: envelope.room,
-      ref: 'issue_snapshot',
-      value: issueSnapshot,
-      updatedAt,
-    });
+    let shouldUpdateSnapshot = true;
+    try {
+      const existing = await cacheStore.get(
+        'object',
+        issueSnapshotStorageKey(envelope.room, issueId),
+      );
+      if (existing) {
+        const parsed = parseIssueCacheSnapshotRecord(existing);
+        if (
+          parsed &&
+          parsed.source_updated_at_ms !== null &&
+          sourceUpdatedAtMs !== null &&
+          sourceUpdatedAtMs < parsed.source_updated_at_ms
+        ) {
+          shouldUpdateSnapshot = false;
+        }
+      }
+    } catch {
+      shouldUpdateSnapshot = true;
+    }
+
+    if (shouldUpdateSnapshot) {
+      const issueSnapshot: IssueCacheSnapshotRecord = {
+        version: 1,
+        kind: 'issue_snapshot',
+        room: envelope.room,
+        issue_id: issueId,
+        last_cursor: issueCursor,
+        envelope,
+        source_updated_at_ms: sourceUpdatedAtMs,
+        updated_at: updatedAt,
+      };
+      await putCacheJsonObject({
+        kind: 'object',
+        key: issueSnapshotStorageKey(envelope.room, issueId),
+        room: envelope.room,
+        ref: 'issue_snapshot',
+        value: issueSnapshot,
+        updatedAt,
+      });
+    }
 
     const issueCursorRecord: IssueCacheCursorRecord = {
       version: 1,
@@ -1950,12 +2135,14 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
           cursor: record.cursor,
           issue_id: record.issue_id,
           action: record.action,
+          source_updated_at_ms: record.source_updated_at_ms,
           updated_at: record.updated_at,
           envelope: sanitizeEnvelope(record.envelope),
         })),
         snapshots: snapshots.map((record) => ({
           issue_id: record.issue_id,
           last_cursor: record.last_cursor,
+          source_updated_at_ms: record.source_updated_at_ms,
           updated_at: record.updated_at,
           envelope: sanitizeEnvelope(record.envelope),
         })),
@@ -2278,69 +2465,73 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
     );
   }
 
-  async function handleGitHubWebhook(request: Request): Promise<Response> {
-    if (request.method !== 'POST') {
-      return methodNotAllowedResponse();
+  type GitHubWebhookApplyResult =
+    | {
+      ok: true;
+      accepted: boolean;
+      duplicate: boolean;
+      deliveryId: string;
+      event: string;
+      action: string;
+      topic: string | null;
+      room: string | null;
+      issueId: string | null;
+      cursor: number | null;
     }
+    | {
+      ok: false;
+      deliveryId: string;
+      event: string;
+      error: string;
+    };
 
-    if (githubWebhookSecret.length === 0) {
-      return toErrorResponse('github webhook secret is not configured', 503);
-    }
-
-    const event = (request.headers.get('x-github-event') ?? '').trim().toLowerCase();
-    if (event !== 'issues' && event !== 'issue_comment' && event !== 'label') {
-      return toErrorResponse('unsupported github webhook event', 400);
-    }
-    const deliveryId = (request.headers.get('x-github-delivery') ?? '').trim();
-    if (deliveryId.length === 0) {
-      return toErrorResponse('missing github delivery id', 400);
-    }
-    const signatureHex = parseGitHubSignatureHeader(
-      request.headers.get('x-hub-signature-256') ?? '',
-    );
-    if (!signatureHex) {
-      return toErrorResponse('invalid github webhook signature', 401);
-    }
-
-    const requestBody = await request.text();
-    const expectedSignatureHex = await hmacSha256Hex(githubWebhookSecret, requestBody);
-    if (!timingSafeEqual(expectedSignatureHex, signatureHex)) {
-      return toErrorResponse('invalid github webhook signature', 401);
+  async function applyGitHubWebhookDelivery(args: {
+    event: string;
+    deliveryId: string;
+    requestBody: string;
+  }): Promise<GitHubWebhookApplyResult> {
+    const event = args.event.trim().toLowerCase();
+    const deliveryId = args.deliveryId.trim();
+    if (event.length === 0) {
+      return { ok: false, deliveryId, event, error: 'missing github event' };
     }
 
     if (hasGitHubDeliveryId(deliveryId)) {
-      return Response.json(
-        {
-          ok: true,
-          accepted: false,
-          duplicate: true,
-          delivery_id: deliveryId,
-          event,
-        },
-        { status: 200 },
-      );
+      return {
+        ok: true,
+        accepted: false,
+        duplicate: true,
+        deliveryId,
+        event,
+        action: '',
+        topic: null,
+        room: null,
+        issueId: null,
+        cursor: null,
+      };
     }
 
     let parsed: unknown;
     try {
-      parsed = JSON.parse(requestBody);
+      parsed = JSON.parse(args.requestBody);
     } catch {
-      return toErrorResponse('invalid json payload', 400);
+      return { ok: false, deliveryId, event, error: 'invalid json payload' };
     }
     if (!isObjectRecord(parsed)) {
-      return toErrorResponse('invalid json payload', 400);
+      return { ok: false, deliveryId, event, error: 'invalid json payload' };
     }
 
     const action = (typeof parsed.action === 'string' ? parsed.action : '').trim().toLowerCase();
     const topic = mapGitHubWebhookTopic(event, action);
     if (!topic || !isValidTopic(topic)) {
-      return toErrorResponse('unsupported github webhook action', 400);
+      return { ok: false, deliveryId, event, error: 'unsupported github webhook event/action' };
     }
 
     const repositoryFullName = readGitHubRepositoryFullName(parsed);
     const room = normalizeGitHubRoomName(repositoryFullName);
     const issueNumber = readGitHubIssueNumber(parsed);
     const issueId = buildGitHubIssueId(repositoryFullName, issueNumber, deliveryId);
+    const issueUpdatedAtMs = readGitHubIssueUpdatedAtMs(parsed);
     const envelopePayload = buildGitHubIssuePayload({
       deliveryId,
       event,
@@ -2349,6 +2540,9 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
       repositoryFullName,
       parsed,
     });
+    if (issueUpdatedAtMs !== null) {
+      envelopePayload.source_updated_at_ms = issueUpdatedAtMs;
+    }
     const sender = readGitHubSender(parsed);
     const envelopeId = `gh-${deliveryId}`;
     const nowSec = nowEpochSec();
@@ -2377,22 +2571,182 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
       await persistEnvelopeToCache(result.envelope, result.body.cursor as number);
     }
 
+    if (result.status !== 200) {
+      return {
+        ok: false,
+        deliveryId,
+        event,
+        error: `publish failed: status=${result.status}`,
+      };
+    }
+
+    const accepted = result.body.accepted === true;
     rememberGitHubDeliveryId(deliveryId, nowSec);
-    const accepted = result.status === 200 && result.body.accepted === true;
+    if (accepted) {
+      removeGitHubWebhookDlq(deliveryId);
+    }
+    return {
+      ok: true,
+      accepted,
+      duplicate: !accepted,
+      deliveryId,
+      event,
+      action,
+      topic,
+      room,
+      issueId,
+      cursor: typeof result.body.cursor === 'number' ? result.body.cursor : null,
+    };
+  }
+
+  async function handleGitHubWebhook(request: Request): Promise<Response> {
+    if (request.method !== 'POST') {
+      return methodNotAllowedResponse();
+    }
+
+    if (githubWebhookSecret.length === 0) {
+      return toErrorResponse('github webhook secret is not configured', 503);
+    }
+
+    const event = (request.headers.get('x-github-event') ?? '').trim().toLowerCase();
+    const deliveryId = (request.headers.get('x-github-delivery') ?? '').trim();
+    if (deliveryId.length === 0) {
+      return toErrorResponse('missing github delivery id', 400);
+    }
+    const signatureHex = parseGitHubSignatureHeader(
+      request.headers.get('x-hub-signature-256') ?? '',
+    );
+    if (!signatureHex) {
+      return toErrorResponse('invalid github webhook signature', 401);
+    }
+
+    const requestBody = await request.text();
+    const expectedSignatureHex = await hmacSha256Hex(githubWebhookSecret, requestBody);
+    if (!timingSafeEqual(expectedSignatureHex, signatureHex)) {
+      return toErrorResponse('invalid github webhook signature', 401);
+    }
+
+    const result = await applyGitHubWebhookDelivery({ event, deliveryId, requestBody });
+    if (!result.ok) {
+      const queued = enqueueGitHubWebhookDlq({
+        deliveryId,
+        event,
+        body: requestBody,
+        error: result.error,
+        incrementRetry: false,
+      });
+      return Response.json(
+        {
+          ok: false,
+          queued: true,
+          delivery_id: deliveryId,
+          event,
+          error: result.error,
+          retry_count: queued.retry_count,
+          next_retry_at: queued.next_retry_at,
+        },
+        { status: 202 },
+      );
+    }
+
     return Response.json(
       {
-        ok: result.status === 200,
-        accepted,
-        duplicate: !accepted,
-        delivery_id: deliveryId,
-        event,
-        action,
-        topic,
-        room,
-        issue_id: issueId,
-        cursor: typeof result.body.cursor === 'number' ? result.body.cursor : null,
+        ok: true,
+        accepted: result.accepted,
+        duplicate: result.duplicate,
+        delivery_id: result.deliveryId,
+        event: result.event,
+        action: result.action,
+        topic: result.topic,
+        room: result.room,
+        issue_id: result.issueId,
+        cursor: result.cursor,
       },
-      { status: result.status },
+      { status: 200 },
+    );
+  }
+
+  function handleGitHubWebhookDlqList(request: Request, url: URL): Response {
+    if (request.method !== 'GET') {
+      return methodNotAllowedResponse();
+    }
+    const after = normalizeAfter(url.searchParams.get('after'), 0);
+    const limit = normalizeLimit(url.searchParams.get('limit'), 100);
+    const listed = listGitHubWebhookDlq(after, limit);
+    return Response.json(
+      {
+        ok: true,
+        next_cursor: listed.nextCursor,
+        entries: listed.entries.map((entry) => ({
+          delivery_id: entry.delivery_id,
+          event: entry.event,
+          retry_count: entry.retry_count,
+          created_at: entry.created_at,
+          updated_at: entry.updated_at,
+          next_retry_at: entry.next_retry_at,
+          last_error: entry.last_error,
+        })),
+      },
+      { status: 200 },
+    );
+  }
+
+  async function handleGitHubWebhookDlqRetry(request: Request, url: URL): Promise<Response> {
+    if (request.method !== 'POST') {
+      return methodNotAllowedResponse();
+    }
+    const deliveryId = (url.searchParams.get('delivery_id') ?? '').trim();
+    if (deliveryId.length === 0) {
+      return toErrorResponse('missing query: delivery_id', 400);
+    }
+    const found = githubWebhookDlq.get(deliveryId);
+    if (!found) {
+      return toErrorResponse('delivery_id not found in dlq', 404);
+    }
+
+    const result = await applyGitHubWebhookDelivery({
+      event: found.event,
+      deliveryId: found.delivery_id,
+      requestBody: found.body,
+    });
+    if (result.ok) {
+      removeGitHubWebhookDlq(deliveryId);
+      return Response.json(
+        {
+          ok: true,
+          queued: false,
+          accepted: result.accepted,
+          duplicate: result.duplicate,
+          delivery_id: result.deliveryId,
+          event: result.event,
+          topic: result.topic,
+          room: result.room,
+          issue_id: result.issueId,
+          cursor: result.cursor,
+        },
+        { status: 200 },
+      );
+    }
+
+    const queued = enqueueGitHubWebhookDlq({
+      deliveryId: found.delivery_id,
+      event: found.event,
+      body: found.body,
+      error: result.error,
+      incrementRetry: true,
+    });
+    return Response.json(
+      {
+        ok: true,
+        queued: true,
+        accepted: false,
+        delivery_id: queued.delivery_id,
+        event: queued.event,
+        error: queued.last_error,
+        retry_count: queued.retry_count,
+        next_retry_at: queued.next_retry_at,
+      },
+      { status: 200 },
     );
   }
 
@@ -2431,6 +2785,14 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
 
     if (pathname === '/api/v1/github/webhook') {
       return handleGitHubWebhook(request);
+    }
+
+    if (pathname === '/api/v1/github/webhook/dlq') {
+      return handleGitHubWebhookDlqList(request, url);
+    }
+
+    if (pathname === '/api/v1/github/webhook/dlq/retry') {
+      return handleGitHubWebhookDlqRetry(request, url);
     }
 
     if (pathname === '/api/v1/cache/exchange/discovery') {
@@ -2952,6 +3314,29 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
       issueCursorSnapshot[room] = normalized;
     }
 
+    const githubWebhookDeliveriesSnapshot: Record<string, number> = {};
+    for (const [deliveryId, ts] of githubWebhookDeliveryIds.entries()) {
+      if (deliveryId.trim().length === 0) continue;
+      if (!Number.isFinite(ts)) continue;
+      githubWebhookDeliveriesSnapshot[deliveryId] = Math.max(0, Math.trunc(ts));
+    }
+
+    const githubWebhookDlqSnapshot: SnapshotGitHubWebhookDlqEntry[] = [];
+    for (const deliveryId of githubWebhookDlqOrder) {
+      const entry = githubWebhookDlq.get(deliveryId);
+      if (!entry) continue;
+      githubWebhookDlqSnapshot.push({
+        delivery_id: entry.delivery_id,
+        event: entry.event,
+        body: entry.body,
+        created_at: entry.created_at,
+        updated_at: entry.updated_at,
+        retry_count: entry.retry_count,
+        next_retry_at: entry.next_retry_at,
+        last_error: entry.last_error,
+      });
+    }
+
     return {
       rooms: snapshotRooms,
       keys_by_sender: keysBySender,
@@ -2961,6 +3346,15 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
         : {}),
       ...(Object.keys(issueCursorSnapshot).length > 0
         ? { issue_cursors: issueCursorSnapshot }
+        : {}),
+      ...(Object.keys(githubWebhookDeliveriesSnapshot).length > 0 ||
+          githubWebhookDlqSnapshot.length > 0
+        ? {
+          github_webhook: {
+            deliveries: githubWebhookDeliveriesSnapshot,
+            dlq: githubWebhookDlqSnapshot,
+          },
+        }
         : {}),
     };
   }
@@ -3050,6 +3444,9 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
     keyRegistry.clear();
     noncesBySender.clear();
     issueCursorByRoom.clear();
+    githubWebhookDeliveryIds.clear();
+    githubWebhookDlq.clear();
+    githubWebhookDlqOrder.splice(0, githubWebhookDlqOrder.length);
     cacheExchangeRecords.splice(0, cacheExchangeRecords.length);
     cacheExchangeCursor = 0;
 
@@ -3200,6 +3597,56 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
         if (!isValidRoomName(room)) continue;
         if (typeof cursorRaw !== 'number' || !Number.isFinite(cursorRaw)) continue;
         issueCursorByRoom.set(room, Math.max(0, Math.trunc(cursorRaw)));
+      }
+    }
+
+    if (isObjectRecord(snapshotData.github_webhook)) {
+      if (isObjectRecord(snapshotData.github_webhook.deliveries)) {
+        for (const [deliveryId, tsRaw] of Object.entries(snapshotData.github_webhook.deliveries)) {
+          if (deliveryId.trim().length === 0) continue;
+          if (typeof tsRaw !== 'number' || !Number.isFinite(tsRaw)) continue;
+          githubWebhookDeliveryIds.set(deliveryId, Math.max(0, Math.trunc(tsRaw)));
+        }
+      }
+      if (Array.isArray(snapshotData.github_webhook.dlq)) {
+        for (const value of snapshotData.github_webhook.dlq) {
+          if (!isObjectRecord(value)) continue;
+          const deliveryId = (typeof value.delivery_id === 'string' ? value.delivery_id : '')
+            .trim();
+          if (deliveryId.length === 0) continue;
+          const event = (typeof value.event === 'string' ? value.event : '').trim();
+          const body = typeof value.body === 'string' ? value.body : '';
+          const createdAt =
+            typeof value.created_at === 'number' && Number.isFinite(value.created_at)
+              ? Math.max(0, Math.trunc(value.created_at))
+              : 0;
+          const updatedAt =
+            typeof value.updated_at === 'number' && Number.isFinite(value.updated_at)
+              ? Math.max(0, Math.trunc(value.updated_at))
+              : createdAt;
+          const retryCount =
+            typeof value.retry_count === 'number' && Number.isFinite(value.retry_count)
+              ? Math.max(0, Math.trunc(value.retry_count))
+              : 0;
+          const nextRetryAt =
+            typeof value.next_retry_at === 'number' && Number.isFinite(value.next_retry_at)
+              ? Math.max(0, Math.trunc(value.next_retry_at))
+              : computeGitHubWebhookNextRetryAt(nowEpochSec(), retryCount);
+          const lastError = typeof value.last_error === 'string' ? value.last_error : '';
+
+          githubWebhookDlq.set(deliveryId, {
+            delivery_id: deliveryId,
+            event,
+            body,
+            created_at: createdAt,
+            updated_at: updatedAt,
+            retry_count: retryCount,
+            next_retry_at: nextRetryAt,
+            last_error: lastError,
+          });
+          githubWebhookDlqOrder.push(deliveryId);
+          if (githubWebhookDlqOrder.length >= MAX_GITHUB_WEBHOOK_DLQ_ENTRIES) break;
+        }
       }
     }
 
