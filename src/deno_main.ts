@@ -37,11 +37,13 @@ function generateSessionId(): string {
 const host = Deno.env.get('HOST') ?? '127.0.0.1';
 const port = parsePositiveInt(Deno.env.get('PORT') ?? undefined, 8788);
 const runtimeConfig = parseRelayRuntimeConfigFromEnv((key) => Deno.env.get(key) ?? undefined);
+const relayCacheStore = createMemoryCacheStore();
 const service = createMemoryRelayService({
   ...runtimeConfig.relay,
   peerRelayUrls: runtimeConfig.peers.urls.length > 0
     ? runtimeConfig.peers.urls
     : runtimeConfig.relay.peerRelayUrls,
+  cacheStore: relayCacheStore,
 });
 const adminGitHubApi = createAdminGitHubApi({
   adminToken: Deno.env.get('RELAY_ADMIN_TOKEN') ?? runtimeConfig.relay.authToken,
@@ -57,7 +59,7 @@ const gitServeSessionOptions = runtimeConfig.gitServe.sessionTtlSec &&
   : undefined;
 
 const gitServeSessions = new Map<string, ReturnType<typeof createGitServeSession>>();
-const gitCacheStore = createMemoryCacheStore();
+const gitCacheStore = relayCacheStore;
 const relayAuthToken = (runtimeConfig.relay.authToken ?? '').trim();
 const peerSyncAuthToken = (runtimeConfig.peers.authToken ?? '').trim();
 const encoder = new TextEncoder();
