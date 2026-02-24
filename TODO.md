@@ -146,7 +146,7 @@
 - [x] Red: issue 作成/更新/close/再オープンの整合性テスト
 - [x] Red: offline node 想定 E2E（origin 停止中でも取得可）
 - [x] Green: issue cache 実装
-- [ ] Refactor: issue projection 層を分離
+- [x] Refactor: issue projection 層を分離
 
 ### 完了条件
 
