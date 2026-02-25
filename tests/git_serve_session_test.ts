@@ -396,6 +396,133 @@ Deno.test('git-receive-pack does not emit incoming_ref events on non-2xx respons
   }
 });
 
+Deno.test('receive-pack disabled error is translated for refs/relay/incoming push flow', async () => {
+  const seenRefs: string[] = [];
+  const session = createGitServeSession({
+    onIncomingRef(event) {
+      seenRefs.push(event.ref);
+    },
+  });
+
+  try {
+    const token = await registerSession(session);
+
+    const discoveryPromise = session.fetch(
+      new Request(`http://do/git/info/refs?service=git-receive-pack&session_token=${token}`),
+    );
+    await new Promise((r) => setTimeout(r, 10));
+    const discoveryPoll = await session.fetch(
+      new Request(`http://do/poll?timeout=1&session_token=${token}`),
+    );
+    const discoveryPollBody = await discoveryPoll.json();
+    assertEquals(discoveryPollBody.requests[0].path, '/info/refs?service=git-receive-pack');
+    await session.fetch(
+      new Request(`http://do/respond?session_token=${token}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          request_id: discoveryPollBody.requests[0].request_id,
+          status: 403,
+          headers: { 'content-type': 'text/plain; charset=utf-8' },
+          body_base64: btoa('receive-pack not enabled'),
+        }),
+      }),
+    );
+    const discoveryRes = await discoveryPromise;
+    assertEquals(discoveryRes.status, 200);
+    assertEquals(
+      discoveryRes.headers.get('content-type'),
+      'application/x-git-receive-pack-advertisement',
+    );
+    const discoveryBody = await discoveryRes.text();
+    assertEquals(discoveryBody.includes('# service=git-receive-pack'), true);
+
+    const receivePackPromise = session.fetch(
+      new Request(`http://do/git/git-receive-pack?session_token=${token}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-git-receive-pack-request' },
+        body: 'refs/relay/incoming/main/ci-compat-1',
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 10));
+    const receivePackPoll = await session.fetch(
+      new Request(`http://do/poll?timeout=1&session_token=${token}`),
+    );
+    const receivePackPollBody = await receivePackPoll.json();
+    assertEquals(receivePackPollBody.requests[0].path, '/git-receive-pack');
+    await session.fetch(
+      new Request(`http://do/respond?session_token=${token}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          request_id: receivePackPollBody.requests[0].request_id,
+          status: 403,
+          headers: { 'content-type': 'text/plain; charset=utf-8' },
+          body_base64: btoa('receive-pack not enabled'),
+        }),
+      }),
+    );
+
+    const receivePackRes = await receivePackPromise;
+    assertEquals(receivePackRes.status, 200);
+    assertEquals(
+      receivePackRes.headers.get('content-type'),
+      'application/x-git-receive-pack-result',
+    );
+    const receivePackBody = await receivePackRes.text();
+    assertEquals(receivePackBody.includes('unpack ok'), true);
+    assertEquals(receivePackBody.includes('ok refs/relay/incoming/main/ci-compat-1'), true);
+    assertEquals(seenRefs, ['refs/relay/incoming/main/ci-compat-1']);
+  } finally {
+    session.cleanup();
+  }
+});
+
+Deno.test('receive-pack disabled fallback is not applied when non-incoming refs are included', async () => {
+  const seenRefs: string[] = [];
+  const session = createGitServeSession({
+    onIncomingRef(event) {
+      seenRefs.push(event.ref);
+    },
+  });
+
+  try {
+    const token = await registerSession(session);
+
+    const receivePackPromise = session.fetch(
+      new Request(`http://do/git/git-receive-pack?session_token=${token}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-git-receive-pack-request' },
+        body: 'refs/heads/main\nrefs/relay/incoming/main/ci-mixed',
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 10));
+    const receivePackPoll = await session.fetch(
+      new Request(`http://do/poll?timeout=1&session_token=${token}`),
+    );
+    const receivePackPollBody = await receivePackPoll.json();
+    await session.fetch(
+      new Request(`http://do/respond?session_token=${token}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          request_id: receivePackPollBody.requests[0].request_id,
+          status: 403,
+          headers: { 'content-type': 'text/plain; charset=utf-8' },
+          body_base64: btoa('receive-pack not enabled'),
+        }),
+      }),
+    );
+
+    const receivePackRes = await receivePackPromise;
+    assertEquals(receivePackRes.status, 403);
+    assertEquals(await receivePackRes.text(), 'receive-pack not enabled');
+    assertEquals(seenRefs, []);
+  } finally {
+    session.cleanup();
+  }
+});
+
 Deno.test('cleanup resolves pending requests with 410', async () => {
   const session = createGitServeSession();
   const token = await registerSession(session);

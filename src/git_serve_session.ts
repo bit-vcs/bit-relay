@@ -7,6 +7,7 @@ interface PendingGitRequest {
   headers: Record<string, string>;
   bodyBase64: string | null;
   incomingRefs: string[];
+  allRelayRefs: string[];
   resolve: (response: Response) => void;
   timeoutId: ReturnType<typeof setTimeout>;
   createdAt: number;
@@ -28,6 +29,10 @@ export interface GitServeSessionState {
 const REQUEST_TIMEOUT_MS = 60_000;
 const POLL_TIMEOUT_MS = 30_000;
 export const DEFAULT_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+const RECEIVE_PACK_DISABLED_MESSAGE = 'receive-pack not enabled';
+const ZERO_OID = '0000000000000000000000000000000000000000';
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
 
 export interface GitServeSessionOptions {
   sessionTtlMs?: number;
@@ -38,6 +43,7 @@ export interface GitServeSessionOptions {
 }
 
 const INCOMING_REF_PATTERN = /refs\/relay\/incoming\/[A-Za-z0-9._/-]{1,255}/g;
+const RELAY_REF_PATTERN = /refs\/[A-Za-z0-9._/-]{1,255}/g;
 
 function generateRequestId(): string {
   return crypto.randomUUID();
@@ -71,8 +77,22 @@ function fromBase64(b64: string): Uint8Array {
 }
 
 function extractIncomingRefs(bodyBytes: Uint8Array): string[] {
-  const decoded = new TextDecoder().decode(bodyBytes);
+  const decoded = textDecoder.decode(bodyBytes);
   const matches = decoded.match(INCOMING_REF_PATTERN);
+  if (!matches || matches.length === 0) return [];
+  const seen = new Set<string>();
+  const refs: string[] = [];
+  for (const ref of matches) {
+    if (seen.has(ref)) continue;
+    seen.add(ref);
+    refs.push(ref);
+  }
+  return refs;
+}
+
+function extractAllRelayRefs(bodyBytes: Uint8Array): string[] {
+  const decoded = textDecoder.decode(bodyBytes);
+  const matches = decoded.match(RELAY_REF_PATTERN);
   if (!matches || matches.length === 0) return [];
   const seen = new Set<string>();
   const refs: string[] = [];
@@ -86,6 +106,70 @@ function extractIncomingRefs(bodyBytes: Uint8Array): string[] {
 
 function isSuccessfulHttpStatus(status: number): boolean {
   return status >= 200 && status < 300;
+}
+
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const copied = new Uint8Array(bytes.byteLength);
+  copied.set(bytes);
+  return copied.buffer;
+}
+
+function toPktLine(payload: string): string {
+  const length = textEncoder.encode(payload).byteLength + 4;
+  return length.toString(16).padStart(4, '0') + payload;
+}
+
+function buildReceivePackAdvertisementBody(): ArrayBuffer {
+  const capabilities = [
+    'report-status',
+    'report-status-v2',
+    'delete-refs',
+    'ofs-delta',
+    'atomic',
+    'quiet',
+  ];
+  const firstRef = `${ZERO_OID} capabilities^{}\0${capabilities.join(' ')}\n`;
+  const body = `${toPktLine('# service=git-receive-pack\n')}0000${toPktLine(firstRef)}0000`;
+  return toArrayBuffer(textEncoder.encode(body));
+}
+
+function buildReceivePackResultBody(incomingRefs: string[]): ArrayBuffer {
+  let body = toPktLine('unpack ok\n');
+  for (const ref of incomingRefs) {
+    body += toPktLine(`ok ${ref}\n`);
+  }
+  body += '0000';
+  return toArrayBuffer(textEncoder.encode(body));
+}
+
+function splitPath(pathWithQuery: string): { pathname: string; search: string } {
+  const [pathname, search = ''] = pathWithQuery.split('?', 2);
+  return { pathname, search };
+}
+
+function isReceivePackInfoRefsPath(pathWithQuery: string): boolean {
+  const { pathname, search } = splitPath(pathWithQuery);
+  if (pathname !== '/info/refs') return false;
+  const params = new URLSearchParams(search);
+  return params.get('service') === 'git-receive-pack';
+}
+
+function isReceivePackRpcPath(pathWithQuery: string): boolean {
+  const { pathname } = splitPath(pathWithQuery);
+  return pathname === '/git-receive-pack';
+}
+
+function shouldCompatAcceptIncomingOnlyPush(pending: PendingGitRequest): boolean {
+  if (!isReceivePackRpcPath(pending.path)) return false;
+  if (pending.incomingRefs.length === 0) return false;
+  if (pending.allRelayRefs.length === 0) return false;
+  return pending.allRelayRefs.every((ref) => ref.startsWith('refs/relay/incoming/'));
+}
+
+function isReceivePackDisabledBody(responseBody: ArrayBuffer | null): boolean {
+  if (!responseBody) return false;
+  const bodyText = textDecoder.decode(new Uint8Array(responseBody)).trim().toLowerCase();
+  return bodyText === RECEIVE_PACK_DISABLED_MESSAGE;
 }
 
 export interface PersistableSessionState {
@@ -230,6 +314,10 @@ export function createGitServeSession(options?: GitServeSessionOptions): {
         bodyBytes !== null
       ? extractIncomingRefs(bodyBytes)
       : [];
+    const allRelayRefs = request.method === 'POST' && gitPath.endsWith('/git-receive-pack') &&
+        bodyBytes !== null
+      ? extractAllRelayRefs(bodyBytes)
+      : [];
 
     const headers: Record<string, string> = {};
     for (const [key, value] of request.headers.entries()) {
@@ -267,6 +355,7 @@ export function createGitServeSession(options?: GitServeSessionOptions): {
         headers,
         bodyBase64,
         incomingRefs,
+        allRelayRefs,
         resolve,
         timeoutId,
         createdAt: Date.now(),
@@ -382,10 +471,28 @@ export function createGitServeSession(options?: GitServeSessionOptions): {
       }
     }
 
-    if (pending.incomingRefs.length > 0 && isSuccessfulHttpStatus(status)) {
+    let finalStatus = status;
+    let finalHeaders = httpHeaders;
+    let finalBody = responseBody;
+    const receivePackDisabled = status === 403 && isReceivePackDisabledBody(responseBody);
+    if (receivePackDisabled && isReceivePackInfoRefsPath(pending.path)) {
+      finalStatus = 200;
+      finalHeaders = new Headers(httpHeaders);
+      finalHeaders.set('content-type', 'application/x-git-receive-pack-advertisement');
+      finalHeaders.set('cache-control', 'no-cache');
+      finalBody = buildReceivePackAdvertisementBody();
+    } else if (receivePackDisabled && shouldCompatAcceptIncomingOnlyPush(pending)) {
+      finalStatus = 200;
+      finalHeaders = new Headers(httpHeaders);
+      finalHeaders.set('content-type', 'application/x-git-receive-pack-result');
+      finalHeaders.set('cache-control', 'no-cache');
+      finalBody = buildReceivePackResultBody(pending.incomingRefs);
+    }
+
+    if (pending.incomingRefs.length > 0 && isSuccessfulHttpStatus(finalStatus)) {
       emitIncomingRefEvents(pending.incomingRefs);
     }
-    pending.resolve(new Response(responseBody, { status, headers: httpHeaders }));
+    pending.resolve(new Response(finalBody, { status: finalStatus, headers: finalHeaders }));
 
     return Response.json({ ok: true });
   }

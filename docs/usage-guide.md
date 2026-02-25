@@ -198,6 +198,9 @@ Once verified, relay sessions use named paths (e.g., `alice/my-repo`) instead of
 | `--auto-fetch`        | Auto-fetch when feature broadcasts are detected              |
 | `--repo <name>`       | Advertise a repository name (enables named sessions)         |
 
+As a compatibility behavior, even when the host returns `receive-pack not enabled`, relay can still
+accept pushes to `refs/relay/incoming/...` for CI triggering.
+
 ### Relay URL Formats
 
 | Format                  | Behavior                                        |

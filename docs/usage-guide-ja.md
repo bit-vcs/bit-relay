@@ -194,6 +194,9 @@ bit relay sync push relay+https://bit-relay.mizchi.workers.dev
 | `--auto-fetch`        | feature broadcast 検知時に自動 fetch                              |
 | `--repo <name>`       | リポジトリ名を指定（名前付きセッションを有効化）                  |
 
+互換モードとして、host 側が `receive-pack not enabled` を返す環境でも `refs/relay/incoming/...` への
+push は relay 側で受理できる（CI トリガー用途）。
+
 ### relay URL 形式
 
 | 形式                    | 動作                                           |

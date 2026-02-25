@@ -22,6 +22,8 @@ Relay dispatches a webhook only when all of the following are true:
 - `RELAY_TRIGGER_WEBHOOK_URL` is configured
 - Incoming ref matches one of configured prefixes
 - Relay responded to `git-receive-pack` with a 2xx status
+- Even if the host returns `receive-pack not enabled`, relay may translate that into a synthetic 2xx
+  for `refs/relay/incoming/...` pushes
 
 Configuration:
 
@@ -35,6 +37,7 @@ Dispatch result behavior:
 - Any 2xx is treated as success
 - Non-2xx or network errors are logged as trigger dispatch failures
 - If `git-receive-pack` returns non-2xx, relay does not emit incoming-ref webhooks
+- Incoming push compatibility translation is treated as 2xx and emits incoming-ref webhooks
 
 ## 3. Outbound Webhook Payload
 
