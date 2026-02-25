@@ -305,6 +305,164 @@ function deriveRoomFromIncomingRef(ref: string): string {
   return first;
 }
 
+function getRelayRoomStub(env: RelayWorkerEnv, room: string): DurableObjectStubLike | null {
+  if (!env.RELAY_ROOM) return null;
+  const id = env.RELAY_ROOM.idFromName(room);
+  return env.RELAY_ROOM.get(id);
+}
+
+function buildForwardedRelayRequest(
+  baseUrl: URL,
+  request: Request,
+  bodyText: string | null,
+): Request {
+  const init: RequestInit = {
+    method: request.method,
+    headers: request.headers,
+  };
+  if (request.method !== 'GET' && request.method !== 'HEAD' && bodyText !== null) {
+    init.body = bodyText;
+  }
+  return new Request(baseUrl.toString(), init);
+}
+
+function parseCacheExchangeEntriesByRoom(parsed: unknown): Map<string, unknown[]> | null {
+  if (!isObjectRecord(parsed) || !Array.isArray(parsed.entries)) return null;
+  const grouped = new Map<string, unknown[]>();
+  for (const entry of parsed.entries) {
+    if (!isObjectRecord(entry)) return null;
+    const room = (typeof entry.room === 'string' ? entry.room : '').trim();
+    if (!isValidRoomName(room)) return null;
+    const list = grouped.get(room);
+    if (list) {
+      list.push(entry);
+    } else {
+      grouped.set(room, [entry]);
+    }
+  }
+  return grouped;
+}
+
+async function routeCacheExchangePushByEntryRoom(
+  url: URL,
+  request: Request,
+  env: RelayWorkerEnv,
+): Promise<Response | null> {
+  if (
+    url.pathname !== '/api/v1/cache/exchange/push' ||
+    request.method !== 'POST' ||
+    !env.RELAY_ROOM
+  ) {
+    return null;
+  }
+
+  const queryRoom = (url.searchParams.get('room') ?? '').trim();
+  if (queryRoom.length > 0) {
+    return null;
+  }
+
+  const bodyText = await request.text();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(bodyText);
+  } catch {
+    const fallbackStub = getRelayRoomStub(env, DEFAULT_ROOM);
+    if (!fallbackStub) {
+      return Response.json({ ok: false, error: 'relay room not available' }, { status: 503 });
+    }
+    return fallbackStub.fetch(buildForwardedRelayRequest(url, request, bodyText));
+  }
+
+  const grouped = parseCacheExchangeEntriesByRoom(parsed);
+  if (!grouped || grouped.size === 0) {
+    const fallbackStub = getRelayRoomStub(env, DEFAULT_ROOM);
+    if (!fallbackStub) {
+      return Response.json({ ok: false, error: 'relay room not available' }, { status: 503 });
+    }
+    return fallbackStub.fetch(buildForwardedRelayRequest(url, request, bodyText));
+  }
+
+  if (grouped.size === 1) {
+    const [singleRoom] = grouped.keys();
+    const stub = getRelayRoomStub(env, singleRoom);
+    if (!stub) {
+      return Response.json({ ok: false, error: 'relay room not available' }, { status: 503 });
+    }
+    const singleUrl = new URL(url.toString());
+    singleUrl.searchParams.set('room', singleRoom);
+    return stub.fetch(buildForwardedRelayRequest(singleUrl, request, bodyText));
+  }
+
+  const aggregateRejectionCounts: Record<string, number> = {};
+  let protocol = 'cache.exchange.v1';
+  let nodeId = '';
+  let nextCursor = 0;
+  let accepted = 0;
+  let duplicates = 0;
+  let conflicts = 0;
+  let rejected = 0;
+
+  for (const [room, entries] of grouped.entries()) {
+    const stub = getRelayRoomStub(env, room);
+    if (!stub) {
+      return Response.json({ ok: false, error: 'relay room not available' }, { status: 503 });
+    }
+    const roomUrl = new URL(url.toString());
+    roomUrl.searchParams.set('room', room);
+    const response = await stub.fetch(
+      buildForwardedRelayRequest(
+        roomUrl,
+        request,
+        JSON.stringify({ entries }),
+      ),
+    );
+    if (response.status !== 200) {
+      return response;
+    }
+    const body = await response.json() as Record<string, unknown>;
+    if (typeof body.protocol === 'string' && body.protocol.trim().length > 0) {
+      protocol = body.protocol;
+    }
+    if (typeof body.node_id === 'string' && body.node_id.trim().length > 0) {
+      nodeId = body.node_id;
+    }
+    if (typeof body.next_cursor === 'number' && Number.isFinite(body.next_cursor)) {
+      nextCursor = Math.max(nextCursor, Math.trunc(body.next_cursor));
+    }
+    if (typeof body.accepted === 'number' && Number.isFinite(body.accepted)) {
+      accepted += Math.max(0, Math.trunc(body.accepted));
+    }
+    if (typeof body.duplicates === 'number' && Number.isFinite(body.duplicates)) {
+      duplicates += Math.max(0, Math.trunc(body.duplicates));
+    }
+    if (typeof body.conflicts === 'number' && Number.isFinite(body.conflicts)) {
+      conflicts += Math.max(0, Math.trunc(body.conflicts));
+    }
+    if (typeof body.rejected === 'number' && Number.isFinite(body.rejected)) {
+      rejected += Math.max(0, Math.trunc(body.rejected));
+    }
+    if (isObjectRecord(body.rejection_counts)) {
+      for (const [reason, count] of Object.entries(body.rejection_counts)) {
+        if (typeof count !== 'number' || !Number.isFinite(count)) continue;
+        aggregateRejectionCounts[reason] = (aggregateRejectionCounts[reason] ?? 0) +
+          Math.max(0, Math.trunc(count));
+      }
+    }
+  }
+
+  return Response.json({
+    ok: true,
+    protocol,
+    node_id: nodeId,
+    accepted,
+    duplicates,
+    conflicts,
+    rejected,
+    rejection_counts: aggregateRejectionCounts,
+    next_cursor: nextCursor,
+  }, { status: 200 });
+}
+
 async function resolveRelayRouteRoom(url: URL, request: Request): Promise<string> {
   const roomFromQuery = (url.searchParams.get('room') ?? '').trim();
   if (roomFromQuery.length > 0) {
@@ -437,6 +595,11 @@ async function handleWorkerRequest(request: Request, env: RelayWorkerEnv): Promi
     return Response.json({ ok: false, error: 'not found' }, { status: 404 });
   }
 
+  const cacheExchangeRouted = await routeCacheExchangePushByEntryRoom(url, request, env);
+  if (cacheExchangeRouted) {
+    return cacheExchangeRouted;
+  }
+
   const room = (await resolveRelayRouteRoom(url, request)).trim();
   if (!isValidRoomName(room)) {
     return invalidRoomResponse();
@@ -480,8 +643,13 @@ async function handleWorkerRequest(request: Request, env: RelayWorkerEnv): Promi
     return response;
   }
 
-  const id = env.RELAY_ROOM.idFromName(room);
-  const stub = env.RELAY_ROOM.get(id);
+  const stub = getRelayRoomStub(env, room);
+  if (!stub) {
+    return Response.json(
+      { ok: false, error: 'relay room not available' },
+      { status: 503 },
+    );
+  }
   const response = await stub.fetch(request);
   if (request.method === 'POST') {
     const sender = url.searchParams.get('sender') ?? '';
