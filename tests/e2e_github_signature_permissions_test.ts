@@ -18,6 +18,10 @@ interface TestSigner {
   rawKey: Uint8Array;
 }
 
+interface AuthOptions {
+  authToken?: string;
+}
+
 function envFrom(entries: Record<string, string | undefined>): (key: string) => string | undefined {
   return (key: string) => entries[key];
 }
@@ -79,6 +83,7 @@ async function signedPublish(baseUrl: string, args: {
   topic?: string;
   room?: string;
   payload: unknown;
+  authToken?: string;
 }): Promise<Response> {
   const topic = args.topic ?? 'notify';
   const room = args.room ?? 'main';
@@ -104,6 +109,7 @@ async function signedPublish(baseUrl: string, args: {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
+      ...(args.authToken ? { authorization: `Bearer ${args.authToken}` } : {}),
       'x-relay-public-key': args.signer.publicKey,
       'x-relay-signature': signature,
       'x-relay-timestamp': String(ts),
@@ -115,7 +121,14 @@ async function signedPublish(baseUrl: string, args: {
 
 async function unsignedPublish(
   baseUrl: string,
-  args: { sender: string; id: string; payload: unknown; topic?: string; room?: string },
+  args: {
+    sender: string;
+    id: string;
+    payload: unknown;
+    topic?: string;
+    room?: string;
+    authToken?: string;
+  },
 ): Promise<Response> {
   const topic = args.topic ?? 'notify';
   const room = args.room ?? 'main';
@@ -126,20 +139,35 @@ async function unsignedPublish(
   url.searchParams.set('id', args.id);
   return fetch(url, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: {
+      'content-type': 'application/json',
+      ...(args.authToken ? { authorization: `Bearer ${args.authToken}` } : {}),
+    },
     body: JSON.stringify(args.payload),
   });
 }
 
-async function verifyGitHub(baseUrl: string, sender: string): Promise<Response> {
+async function verifyGitHub(
+  baseUrl: string,
+  sender: string,
+  auth?: AuthOptions,
+): Promise<Response> {
   return fetch(`${baseUrl}/api/v1/key/verify-github`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: {
+      'content-type': 'application/json',
+      ...(auth?.authToken ? { authorization: `Bearer ${auth.authToken}` } : {}),
+    },
     body: JSON.stringify({ sender, github_username: sender }),
   });
 }
 
-async function registerServe(baseUrl: string, sender: string, repo: string): Promise<{
+async function registerServe(
+  baseUrl: string,
+  sender: string,
+  repo: string,
+  auth?: AuthOptions,
+): Promise<{
   status: number;
   body: Record<string, unknown>;
 }> {
@@ -147,7 +175,10 @@ async function registerServe(baseUrl: string, sender: string, repo: string): Pro
     `${baseUrl}/api/v1/serve/register?sender=${encodeURIComponent(sender)}&repo=${
       encodeURIComponent(repo)
     }`,
-    { method: 'POST' },
+    {
+      method: 'POST',
+      headers: auth?.authToken ? { authorization: `Bearer ${auth.authToken}` } : undefined,
+    },
   );
   return {
     status: response.status,
@@ -157,6 +188,7 @@ async function registerServe(baseUrl: string, sender: string, repo: string): Pro
 
 function createTestRelayServer(args: {
   requireSignatureFlag: 'true' | 'false';
+  authToken?: string;
   fetchFn?: typeof globalThis.fetch;
 }): {
   baseUrl: string;
@@ -165,6 +197,7 @@ function createTestRelayServer(args: {
   const runtimeConfig = parseRelayRuntimeConfigFromEnv(
     envFrom({
       RELAY_REQUIRE_SIGNATURE: args.requireSignatureFlag,
+      BIT_RELAY_AUTH_TOKEN: args.authToken,
     }),
   );
   const service = createMemoryRelayService({
@@ -232,7 +265,11 @@ function createTestRelayServer(args: {
       let sessionId = generateSessionId();
       if (sender && repo) {
         const keyInfoRes = await service.fetch(
-          new Request(`http://relay.local/api/v1/key/info?sender=${encodeURIComponent(sender)}`),
+          new Request(`http://relay.local/api/v1/key/info?sender=${encodeURIComponent(sender)}`, {
+            headers: runtimeConfig.relay.authToken
+              ? { authorization: `Bearer ${runtimeConfig.relay.authToken}` }
+              : undefined,
+          }),
         );
         const keyInfo = await keyInfoRes.json() as Record<string, unknown>;
         const keyRecord = keyInfo.key as Record<string, unknown> | undefined;
@@ -400,6 +437,96 @@ Deno.test('e2e: RELAY_REQUIRE_SIGNATURE=false still requires GitHub verification
     const afterVerify = await registerServe(relay.baseUrl, 'alice', 'bit-relay');
     assertEquals(afterVerify.status, 200);
     assertEquals(afterVerify.body.session_id, 'alice/bit-relay');
+  } finally {
+    await relay.shutdown();
+  }
+});
+
+Deno.test('e2e: BIT_RELAY_AUTH_TOKEN gates publish/verify while named session uses verified state', async () => {
+  const authToken = 'relay-secret-token';
+  const aliceSigner = await createSignerWithRawKey();
+  const relay = createTestRelayServer({
+    requireSignatureFlag: 'true',
+    authToken,
+    fetchFn: createMockGitHubFetchByUser({ alice: [aliceSigner.rawKey] }),
+  });
+
+  try {
+    const signedWithoutAuth = await signedPublish(relay.baseUrl, {
+      signer: aliceSigner,
+      sender: 'alice',
+      id: 'auth-signed-ng',
+      payload: { body: 'auth required' },
+    });
+    assertEquals(signedWithoutAuth.status, 401);
+    await signedWithoutAuth.json();
+
+    const signedWithAuth = await signedPublish(relay.baseUrl, {
+      signer: aliceSigner,
+      sender: 'alice',
+      id: 'auth-signed-ok',
+      payload: { body: 'authorized publish' },
+      authToken,
+    });
+    assertEquals(signedWithAuth.status, 200);
+    await signedWithAuth.json();
+
+    const verifyWithoutAuth = await verifyGitHub(relay.baseUrl, 'alice');
+    assertEquals(verifyWithoutAuth.status, 401);
+    await verifyWithoutAuth.json();
+
+    const verifyWithWrongAuth = await verifyGitHub(relay.baseUrl, 'alice', {
+      authToken: 'wrong-token',
+    });
+    assertEquals(verifyWithWrongAuth.status, 401);
+    await verifyWithWrongAuth.json();
+
+    const beforeVerify = await registerServe(relay.baseUrl, 'alice', 'bit-relay');
+    assertEquals(beforeVerify.status, 200);
+    assertMatch(String(beforeVerify.body.session_id), RANDOM_SESSION_PATTERN);
+
+    const verifyWithAuth = await verifyGitHub(relay.baseUrl, 'alice', { authToken });
+    assertEquals(verifyWithAuth.status, 200);
+    const verifyWithAuthBody = await verifyWithAuth.json() as Record<string, unknown>;
+    assertEquals(verifyWithAuthBody.verified, true);
+
+    const afterVerifyNoAuth = await registerServe(relay.baseUrl, 'alice', 'bit-relay');
+    assertEquals(afterVerifyNoAuth.status, 200);
+    assertEquals(afterVerifyNoAuth.body.session_id, 'alice/bit-relay');
+
+    const bobRegister = await registerServe(relay.baseUrl, 'bob', 'bit-relay');
+    assertEquals(bobRegister.status, 200);
+    assertMatch(String(bobRegister.body.session_id), RANDOM_SESSION_PATTERN);
+  } finally {
+    await relay.shutdown();
+  }
+});
+
+Deno.test('e2e: BIT_RELAY_AUTH_TOKEN with RELAY_REQUIRE_SIGNATURE=false still blocks unauthorized publish', async () => {
+  const authToken = 'relay-secret-token';
+  const relay = createTestRelayServer({
+    requireSignatureFlag: 'false',
+    authToken,
+    fetchFn: createMockGitHubFetchByUser({}),
+  });
+
+  try {
+    const unsignedWithoutAuth = await unsignedPublish(relay.baseUrl, {
+      sender: 'bob',
+      id: 'auth-unsigned-ng',
+      payload: { body: 'auth required even without signature requirement' },
+    });
+    assertEquals(unsignedWithoutAuth.status, 401);
+    await unsignedWithoutAuth.json();
+
+    const unsignedWithAuth = await unsignedPublish(relay.baseUrl, {
+      sender: 'bob',
+      id: 'auth-unsigned-ok',
+      payload: { body: 'authorized unsigned publish' },
+      authToken,
+    });
+    assertEquals(unsignedWithAuth.status, 200);
+    await unsignedWithAuth.json();
   } finally {
     await relay.shutdown();
   }
