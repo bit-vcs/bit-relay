@@ -84,6 +84,10 @@ function extractIncomingRefs(bodyBytes: Uint8Array): string[] {
   return refs;
 }
 
+function isSuccessfulHttpStatus(status: number): boolean {
+  return status >= 200 && status < 300;
+}
+
 export interface PersistableSessionState {
   active: boolean;
   sessionToken: string;
@@ -226,7 +230,6 @@ export function createGitServeSession(options?: GitServeSessionOptions): {
         bodyBytes !== null
       ? extractIncomingRefs(bodyBytes)
       : [];
-    emitIncomingRefEvents(incomingRefs);
 
     const headers: Record<string, string> = {};
     for (const [key, value] of request.headers.entries()) {
@@ -379,6 +382,9 @@ export function createGitServeSession(options?: GitServeSessionOptions): {
       }
     }
 
+    if (pending.incomingRefs.length > 0 && isSuccessfulHttpStatus(status)) {
+      emitIncomingRefEvents(pending.incomingRefs);
+    }
     pending.resolve(new Response(responseBody, { status, headers: httpHeaders }));
 
     return Response.json({ ok: true });

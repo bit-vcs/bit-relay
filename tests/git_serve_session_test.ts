@@ -330,10 +330,67 @@ Deno.test('git-receive-pack can emit incoming_ref events via callback', async ()
     );
 
     await new Promise((r) => setTimeout(r, 10));
-    session.cleanup();
+    const pollRes = await session.fetch(
+      new Request(`http://do/poll?timeout=1&session_token=${token}`),
+    );
+    const pollBody = await pollRes.json();
+    await session.fetch(
+      new Request(`http://do/respond?session_token=${token}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          request_id: pollBody.requests[0].request_id,
+          status: 200,
+          headers: {},
+        }),
+      }),
+    );
     await pending;
 
     assertEquals(seenRefs, ['refs/relay/incoming/ci-999']);
+  } finally {
+    session.cleanup();
+  }
+});
+
+Deno.test('git-receive-pack does not emit incoming_ref events on non-2xx response', async () => {
+  const seenRefs: string[] = [];
+  const session = createGitServeSession({
+    onIncomingRef(event) {
+      seenRefs.push(event.ref);
+    },
+  });
+
+  try {
+    const token = await registerSession(session);
+
+    const pending = session.fetch(
+      new Request(`http://do/git/git-receive-pack?session_token=${token}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-git-receive-pack-request' },
+        body: 'refs/relay/incoming/ci-denied',
+      }),
+    );
+
+    await new Promise((r) => setTimeout(r, 10));
+    const pollRes = await session.fetch(
+      new Request(`http://do/poll?timeout=1&session_token=${token}`),
+    );
+    const pollBody = await pollRes.json();
+    await session.fetch(
+      new Request(`http://do/respond?session_token=${token}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          request_id: pollBody.requests[0].request_id,
+          status: 403,
+          headers: {},
+        }),
+      }),
+    );
+    const response = await pending;
+    assertEquals(response.status, 403);
+    assertEquals(seenRefs, []);
   } finally {
     session.cleanup();
   }
