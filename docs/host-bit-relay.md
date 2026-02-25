@@ -141,6 +141,60 @@ bit relay serve relay+https://<your-worker>.workers.dev
 bit relay sync push relay+https://<your-worker>.workers.dev
 ```
 
+## Runbook: Rotate `RELAY_PEER_AUTH_TOKEN`
+
+Use this when peer cache APIs must be re-keyed without breaking relay operations.
+
+### 1) Generate a new token
+
+```bash
+NEW_TOKEN="$(openssl rand -hex 32)"
+echo "$NEW_TOKEN"
+```
+
+### 2) Update Cloudflare secret
+
+```bash
+printf '%s' "$NEW_TOKEN" | wrangler secret put RELAY_PEER_AUTH_TOKEN
+```
+
+### 3) Roll out to every peer relay
+
+Every peer process must run with the same token value:
+
+```bash
+RELAY_PEER_AUTH_TOKEN="$NEW_TOKEN"
+```
+
+For this repository's helper scripts, include it in the relay start env (for example on
+sprites/exe).
+
+### 4) Verify auth boundary (must pass)
+
+```bash
+BASE="https://<relay>.workers.dev"
+
+# no auth -> 401
+curl -i "$BASE/api/v1/cache/exchange/discovery"
+
+# with auth -> 200
+curl -i -H "authorization: Bearer $NEW_TOKEN" \
+  "$BASE/api/v1/cache/exchange/discovery"
+```
+
+Also verify issue cache API:
+
+```bash
+curl -i "$BASE/api/v1/cache/issues/pull?room=main&after=0&limit=1"
+curl -i -H "authorization: Bearer $NEW_TOKEN" \
+  "$BASE/api/v1/cache/issues/pull?room=main&after=0&limit=1"
+```
+
+### 5) Invalidate old token
+
+After all peers are updated, old token requests must return `401`. Run a final check against known
+peers and remove any leftover old-token env values.
+
 ## Architecture
 
 ```
