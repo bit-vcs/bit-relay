@@ -1,4 +1,5 @@
 import type { CacheStore, CacheStoreListResult, CacheStoreObject } from './cache_store.ts';
+import type { IssueSourceOfTruth } from './memory_handler.ts';
 import { createCachePersistenceQueue } from './cache_persistence_queue.ts';
 import { canonicalizeJson, sha256Hex } from './signing.ts';
 import {
@@ -42,6 +43,7 @@ export interface RelayCacheAdapterOptions {
   cacheStore: CacheStore | null;
   isValidRoomName: (room: string) => boolean;
   isValidTopic: (topic: string) => boolean;
+  issueSourceOfTruth?: IssueSourceOfTruth;
   nowSec?: () => number;
   cachePersistMaxRetries?: number;
   cachePersistRetryBaseDelayMs?: number;
@@ -76,6 +78,9 @@ export interface RelayCacheAdapter {
 const DEFAULT_CACHE_PERSIST_MAX_RETRIES = 2;
 const DEFAULT_CACHE_PERSIST_RETRY_BASE_DELAY_MS = 20;
 const DEFAULT_CACHE_PERSIST_RETRY_MAX_DELAY_MS = 500;
+const DEFAULT_ISSUE_SOURCE_OF_TRUTH: IssueSourceOfTruth = 'last_write';
+
+type NormalizedIssueSource = 'github' | 'bit' | null;
 
 function nowEpochSec(): number {
   return Math.floor(Date.now() / 1000);
@@ -114,11 +119,58 @@ function describeError(error: unknown): string {
   return String(error);
 }
 
+function normalizeIssueSourceOfTruth(raw: IssueSourceOfTruth | undefined): IssueSourceOfTruth {
+  return raw === 'github' || raw === 'bit' ? raw : DEFAULT_ISSUE_SOURCE_OF_TRUTH;
+}
+
+function parseIssueSource(payload: JsonValue): NormalizedIssueSource {
+  if (!isObjectRecord(payload)) return null;
+  if (typeof payload.source !== 'string') return null;
+  const source = payload.source.trim().toLowerCase();
+  if (source === 'github') return 'github';
+  if (source === 'bit') return 'bit';
+  return null;
+}
+
+function isOlderByTimestamp(
+  incomingSourceUpdatedAtMs: number | null,
+  existingSourceUpdatedAtMs: number | null,
+): boolean {
+  return incomingSourceUpdatedAtMs !== null &&
+    existingSourceUpdatedAtMs !== null &&
+    incomingSourceUpdatedAtMs < existingSourceUpdatedAtMs;
+}
+
+function shouldUpdateSnapshotBySourcePolicy(args: {
+  policy: IssueSourceOfTruth;
+  incomingSource: NormalizedIssueSource;
+  existingSource: NormalizedIssueSource;
+  incomingSourceUpdatedAtMs: number | null;
+  existingSourceUpdatedAtMs: number | null;
+}): boolean {
+  if (isOlderByTimestamp(args.incomingSourceUpdatedAtMs, args.existingSourceUpdatedAtMs)) {
+    return false;
+  }
+  if (args.policy === 'last_write') {
+    return true;
+  }
+
+  const preferred = args.policy;
+  if (args.existingSource === preferred && args.incomingSource !== preferred) {
+    return false;
+  }
+  if (args.existingSource !== preferred && args.incomingSource === preferred) {
+    return true;
+  }
+  return true;
+}
+
 export function createRelayCacheAdapter(options: RelayCacheAdapterOptions): RelayCacheAdapter {
   const cacheStore = options.cacheStore;
   const isValidRoomName = options.isValidRoomName;
   const isValidTopic = options.isValidTopic;
   const nowSec = options.nowSec ?? nowEpochSec;
+  const issueSourceOfTruth = normalizeIssueSourceOfTruth(options.issueSourceOfTruth);
   const issueProjectionValidators: IssueProjectionValidators = {
     isValidRoomName,
     isValidTopic,
@@ -263,13 +315,16 @@ export function createRelayCacheAdapter(options: RelayCacheAdapterOptions): Rela
       );
       if (existing) {
         const parsed = parseIssueCacheSnapshotRecord(existing, issueProjectionValidators);
-        if (
-          parsed &&
-          parsed.source_updated_at_ms !== null &&
-          sourceUpdatedAtMs !== null &&
-          sourceUpdatedAtMs < parsed.source_updated_at_ms
-        ) {
-          shouldUpdateSnapshot = false;
+        if (parsed) {
+          const existingSource = parseIssueSource(parsed.envelope.payload);
+          const incomingSource = parseIssueSource(envelope.payload);
+          shouldUpdateSnapshot = shouldUpdateSnapshotBySourcePolicy({
+            policy: issueSourceOfTruth,
+            incomingSource,
+            existingSource,
+            incomingSourceUpdatedAtMs: sourceUpdatedAtMs,
+            existingSourceUpdatedAtMs: parsed.source_updated_at_ms,
+          });
         }
       }
     } catch {

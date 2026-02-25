@@ -232,3 +232,39 @@ Deno.test('cache issue pull retries transient cache put failures', async () => {
     service.close();
   }
 });
+
+Deno.test('cache issue endpoints require peer auth token when configured', async () => {
+  const service = createMemoryRelayService({
+    requireSignatures: false,
+    cacheStore: createMemoryCacheStore(),
+    peerAuthToken: 'peer-shared-secret',
+  } as any);
+
+  try {
+    const pullNoAuth = await service.fetch(
+      new Request('http://relay.local/api/v1/cache/issues/pull?room=repo-a&after=0&limit=10'),
+    );
+    assertEquals(pullNoAuth.status, 401);
+
+    const pullWithAuth = await service.fetch(
+      new Request('http://relay.local/api/v1/cache/issues/pull?room=repo-a&after=0&limit=10', {
+        headers: { authorization: 'Bearer peer-shared-secret' },
+      }),
+    );
+    assertEquals(pullWithAuth.status, 200);
+
+    const syncNoAuth = await service.fetch(
+      new Request('http://relay.local/api/v1/cache/issues/sync?room=repo-a&after=0&limit=10'),
+    );
+    assertEquals(syncNoAuth.status, 401);
+
+    const syncWithAuth = await service.fetch(
+      new Request('http://relay.local/api/v1/cache/issues/sync?room=repo-a&after=0&limit=10', {
+        headers: { authorization: 'Bearer peer-shared-secret' },
+      }),
+    );
+    assertEquals(syncWithAuth.status, 200);
+  } finally {
+    service.close();
+  }
+});

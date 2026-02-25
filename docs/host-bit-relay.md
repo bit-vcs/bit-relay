@@ -66,9 +66,10 @@ All configuration is done via environment variables (set in the Cloudflare dashb
 
 ### Authentication
 
-| Variable               | Description                                                                                                                           | Default      |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
-| `BIT_RELAY_AUTH_TOKEN` | Bearer token for API authentication. When set, all `/api/v1/*` and `/ws` requests require this token. Leave unset for a public relay. | (none, open) |
+| Variable                | Description                                                                                                                           | Default      |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
+| `BIT_RELAY_AUTH_TOKEN`  | Bearer token for API authentication. When set, all `/api/v1/*` and `/ws` requests require this token. Leave unset for a public relay. | (none, open) |
+| `RELAY_PEER_AUTH_TOKEN` | Shared bearer token for relay-to-relay cache endpoints (`/api/v1/cache/exchange/*`, `/api/v1/cache/issues/*`).                        | (none)       |
 
 ### Signature Verification
 
@@ -91,12 +92,13 @@ All configuration is done via environment variables (set in the Cloudflare dashb
 
 ### Rooms and Sessions
 
-| Variable                      | Description                              | Default            |
-| ----------------------------- | ---------------------------------------- | ------------------ |
-| `RELAY_MAX_MESSAGES_PER_ROOM` | Max stored messages per room             | (built-in default) |
-| `RELAY_ROOM_TOKENS`           | JSON object mapping room names to tokens | `{}`               |
-| `RELAY_PRESENCE_TTL_SEC`      | Presence heartbeat TTL                   | (built-in default) |
-| `GIT_SERVE_SESSION_TTL_SEC`   | Git serve session TTL (0 = no expiry)    | `0`                |
+| Variable                      | Description                                                    | Default            |
+| ----------------------------- | -------------------------------------------------------------- | ------------------ |
+| `RELAY_MAX_MESSAGES_PER_ROOM` | Max stored messages per room                                   | (built-in default) |
+| `RELAY_ROOM_TOKENS`           | JSON object mapping room names to tokens                       | `{}`               |
+| `RELAY_PRESENCE_TTL_SEC`      | Presence heartbeat TTL                                         | (built-in default) |
+| `GIT_SERVE_SESSION_TTL_SEC`   | Git serve session TTL (0 = no expiry)                          | `0`                |
+| `RELAY_ISSUE_SOURCE_OF_TRUTH` | Issue snapshot conflict policy (`last_write`, `github`, `bit`) | `last_write`       |
 
 ### WebSocket
 
@@ -119,6 +121,10 @@ wrangler secret put RELAY_REQUIRE_SIGNATURE
 # Set a room token
 wrangler secret put RELAY_ROOM_TOKENS
 # Enter: {"my-room":"secret-token"}
+
+# Set relay-to-relay shared token for cache exchange
+wrangler secret put RELAY_PEER_AUTH_TOKEN
+# Enter: <shared-token>
 ```
 
 ## Verify Deployment

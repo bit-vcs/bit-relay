@@ -175,9 +175,11 @@ optional env:
 - `RELAY_NODE_ID` (cache exchange ノード ID)
 - `RELAY_PEERS` (CSV: peer relay URLs)
 - `RELAY_PEERS_JSON` (JSON: peer relay URLs, `RELAY_PEERS` より優先)
-- `RELAY_PEER_AUTH_TOKEN` (peer pull 時の Bearer token)
+- `RELAY_PEER_AUTH_TOKEN` (relay 間共有 Bearer token。設定時は `/api/v1/cache/exchange/*` と
+  `/api/v1/cache/issues/*` が必須認証)
 - `RELAY_PEER_SYNC_INTERVAL_SEC` (default: `30`)
 - `RELAY_PEER_REPO_FF_COMMIT_WINDOW` (default: `30`, peer 間 repo 判定で見る commit 数)
+- `RELAY_ISSUE_SOURCE_OF_TRUTH` (`last_write` | `github` | `bit`, default: `last_write`)
 - `RELAY_REPO_ID` (明示 repo ID, 例: `bit-vcs/bit`)
 - `RELAY_REPO_ORIGIN_URL` (origin URL の明示上書き)
 - `RELAY_REPO_RECENT_COMMITS` (CSV: 最近 commit hash)

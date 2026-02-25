@@ -79,6 +79,7 @@ const relayCacheStore = createMemoryCacheStore({
 });
 const service = createMemoryRelayService({
   ...runtimeConfig.relay,
+  peerAuthToken: runtimeConfig.peers.authToken ?? runtimeConfig.relay.peerAuthToken,
   peerRelayUrls: runtimeConfig.peers.urls.length > 0
     ? runtimeConfig.peers.urls
     : runtimeConfig.relay.peerRelayUrls,

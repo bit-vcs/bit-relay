@@ -88,6 +88,14 @@ function parseOptionalString(raw: string | undefined): string | null {
   return value.length > 0 ? value : null;
 }
 
+function parseIssueSourceOfTruth(
+  raw: string | undefined,
+): 'last_write' | 'github' | 'bit' {
+  const value = (raw ?? '').trim().toLowerCase();
+  if (value === 'github' || value === 'bit') return value;
+  return 'last_write';
+}
+
 function parseRoomTokens(raw: string | undefined): Record<string, string> {
   if (typeof raw !== 'string' || raw.trim().length === 0) return {};
   try {
@@ -294,6 +302,8 @@ export function parseMemoryRelayOptionsFromEnv(getEnv: EnvGetter): MemoryRelayOp
 
   return {
     authToken: getEnv('BIT_RELAY_AUTH_TOKEN') ?? undefined,
+    peerAuthToken: getEnv('RELAY_PEER_AUTH_TOKEN') ?? undefined,
+    issueSourceOfTruth: parseIssueSourceOfTruth(getEnv('RELAY_ISSUE_SOURCE_OF_TRUTH')),
     maxMessagesPerRoom: parsePositiveInt(
       getEnv('RELAY_MAX_MESSAGES_PER_ROOM'),
       DEFAULT_MAX_MESSAGES_PER_ROOM,

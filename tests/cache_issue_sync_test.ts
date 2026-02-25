@@ -260,3 +260,125 @@ Deno.test('cache issue sync returns 405 for non-GET', async () => {
     service.close();
   }
 });
+
+Deno.test('cache issue sync keeps github snapshot when source of truth is github', async () => {
+  const cacheStore = createMemoryCacheStore();
+  const service = createMemoryRelayService({
+    requireSignatures: false,
+    cacheStore,
+    issueSourceOfTruth: 'github',
+  } as any);
+
+  try {
+    await service.fetch(
+      publishRequest({
+        room: 'repo-stot',
+        sender: 'github:webhook',
+        id: 'gh-1',
+        topic: 'issue.updated',
+        payload: {
+          issue_id: 'issue-1',
+          source: 'github',
+          source_updated_at_ms: 2000,
+          title: 'from github',
+        },
+      }),
+    );
+    await service.fetch(
+      publishRequest({
+        room: 'repo-stot',
+        sender: 'alice',
+        id: 'bit-1',
+        topic: 'issue.updated',
+        payload: {
+          issue_id: 'issue-1',
+          source: 'bit',
+          title: 'from bit',
+        },
+      }),
+    );
+
+    const syncRes = await service.fetch(
+      new Request('http://relay.local/api/v1/cache/issues/sync?room=repo-stot&after=0&limit=10'),
+    );
+    assertEquals(syncRes.status, 200);
+    const sync = await syncRes.json() as {
+      snapshots: Array<Record<string, unknown>>;
+    };
+    assertEquals(sync.snapshots.length, 1);
+    assertObjectMatch(sync.snapshots[0], {
+      issue_id: 'issue-1',
+      envelope: {
+        id: 'gh-1',
+        payload: {
+          source: 'github',
+          title: 'from github',
+        },
+      },
+    });
+  } finally {
+    service.close();
+  }
+});
+
+Deno.test('cache issue sync allows bit snapshot override when source of truth is bit', async () => {
+  const cacheStore = createMemoryCacheStore();
+  const service = createMemoryRelayService({
+    requireSignatures: false,
+    cacheStore,
+    issueSourceOfTruth: 'bit',
+  } as any);
+
+  try {
+    await service.fetch(
+      publishRequest({
+        room: 'repo-stot-bit',
+        sender: 'github:webhook',
+        id: 'gh-1',
+        topic: 'issue.updated',
+        payload: {
+          issue_id: 'issue-1',
+          source: 'github',
+          source_updated_at_ms: 2000,
+          title: 'from github',
+        },
+      }),
+    );
+    await service.fetch(
+      publishRequest({
+        room: 'repo-stot-bit',
+        sender: 'alice',
+        id: 'bit-1',
+        topic: 'issue.updated',
+        payload: {
+          issue_id: 'issue-1',
+          source: 'bit',
+          title: 'from bit',
+        },
+      }),
+    );
+
+    const syncRes = await service.fetch(
+      new Request(
+        'http://relay.local/api/v1/cache/issues/sync?room=repo-stot-bit&after=0&limit=10',
+      ),
+    );
+    assertEquals(syncRes.status, 200);
+    const sync = await syncRes.json() as {
+      snapshots: Array<Record<string, unknown>>;
+    };
+    assertEquals(sync.snapshots.length, 1);
+    assertObjectMatch(sync.snapshots[0], {
+      issue_id: 'issue-1',
+      envelope: {
+        id: 'bit-1',
+        payload: {
+          source: 'bit',
+          title: 'from bit',
+        },
+      },
+    });
+  } finally {
+    service.close();
+  }
+});

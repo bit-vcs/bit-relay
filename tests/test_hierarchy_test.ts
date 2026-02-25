@@ -10,6 +10,7 @@ const EXPECTED_TEST_FILES = [
   'tests/cache_persistence_queue_test.ts',
   'tests/cache_store_contract_test.ts',
   'tests/cache_sync_worker_test.ts',
+  'tests/cloudflare_worker_test.ts',
   'tests/e2e_agent_collaboration_test.ts',
   'tests/e2e_cache_sync_test.ts',
   'tests/e2e_chunk_exchange_test.ts',

@@ -26,19 +26,26 @@ function cachePullRequest(args: {
   limit?: number;
   peer?: string;
   room?: string;
+  authToken?: string;
 }): Request {
   const url = new URL('http://relay.local/api/v1/cache/exchange/pull');
   if (args.after !== undefined) url.searchParams.set('after', String(args.after));
   if (args.limit !== undefined) url.searchParams.set('limit', String(args.limit));
   if (args.peer !== undefined) url.searchParams.set('peer', args.peer);
   if (args.room !== undefined) url.searchParams.set('room', args.room);
-  return new Request(url.toString(), { method: 'GET' });
+  return new Request(url.toString(), {
+    method: 'GET',
+    headers: args.authToken ? { authorization: `Bearer ${args.authToken}` } : undefined,
+  });
 }
 
-function cachePushRequest(entries: unknown[]): Request {
+function cachePushRequest(entries: unknown[], authToken?: string): Request {
   return new Request('http://relay.local/api/v1/cache/exchange/push', {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: {
+      'content-type': 'application/json',
+      ...(authToken ? { authorization: `Bearer ${authToken}` } : {}),
+    },
     body: JSON.stringify({ entries }),
   });
 }
@@ -280,6 +287,44 @@ Deno.test('cache exchange pull applies peer and room filters', async () => {
     const body = await pullRes.json();
     assertEquals(body.entries.length, 1);
     assertEquals(body.entries[0].id, 'local-main');
+  } finally {
+    service.close();
+  }
+});
+
+Deno.test('cache exchange endpoints require peer auth token when configured', async () => {
+  const service = createMemoryRelayService({
+    requireSignatures: false,
+    relayNodeId: 'relay-a',
+    peerAuthToken: 'peer-shared-secret',
+  } as any);
+
+  try {
+    const discoveryNoAuth = await service.fetch(
+      new Request('http://relay.local/api/v1/cache/exchange/discovery'),
+    );
+    assertEquals(discoveryNoAuth.status, 401);
+
+    const discoveryWithAuth = await service.fetch(
+      new Request('http://relay.local/api/v1/cache/exchange/discovery', {
+        headers: { authorization: 'Bearer peer-shared-secret' },
+      }),
+    );
+    assertEquals(discoveryWithAuth.status, 200);
+
+    const pullNoAuth = await service.fetch(cachePullRequest({ after: 0, limit: 10 }));
+    assertEquals(pullNoAuth.status, 401);
+
+    const pullWithAuth = await service.fetch(
+      cachePullRequest({ after: 0, limit: 10, authToken: 'peer-shared-secret' }),
+    );
+    assertEquals(pullWithAuth.status, 200);
+
+    const pushNoAuth = await service.fetch(cachePushRequest([]));
+    assertEquals(pushNoAuth.status, 401);
+
+    const pushWithAuth = await service.fetch(cachePushRequest([], 'peer-shared-secret'));
+    assertEquals(pushWithAuth.status, 200);
   } finally {
     service.close();
   }

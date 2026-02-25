@@ -46,6 +46,7 @@ export interface RelayWorkerEnv {
   RELAY_MAX_CLOCK_SKEW_SEC?: string;
   RELAY_NONCE_TTL_SEC?: string;
   RELAY_MAX_NONCES_PER_SENDER?: string;
+  RELAY_PEER_AUTH_TOKEN?: string;
   RELAY_PRESENCE_TTL_SEC?: string;
   RELAY_IP_PUBLISH_LIMIT_PER_WINDOW?: string;
   RELAY_ROOM_PUBLISH_LIMIT_PER_WINDOW?: string;
@@ -59,6 +60,7 @@ export interface RelayWorkerEnv {
 }
 
 const IDENTITY_KEY = 'relay_identity_v1';
+const INCOMING_TRIGGER_REF_PREFIX = 'refs/relay/incoming/';
 let fallbackService: MemoryRelayService | null = null;
 let adminGitHubApi: ReturnType<typeof createAdminGitHubApi> | null = null;
 const requestMetrics = createRelayRequestMetricRecorder();
@@ -289,6 +291,48 @@ function invalidRoomResponse(): Response {
   return Response.json({ ok: false, error: 'invalid room' }, { status: 400 });
 }
 
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function deriveRoomFromIncomingRef(ref: string): string {
+  const trimmed = ref.trim();
+  if (!trimmed.startsWith(INCOMING_TRIGGER_REF_PREFIX)) return DEFAULT_ROOM;
+  const suffix = trimmed.slice(INCOMING_TRIGGER_REF_PREFIX.length).trim();
+  if (suffix.length === 0) return DEFAULT_ROOM;
+  const first = suffix.split('/')[0].trim();
+  if (!isValidRoomName(first)) return DEFAULT_ROOM;
+  return first;
+}
+
+async function resolveRelayRouteRoom(url: URL, request: Request): Promise<string> {
+  const roomFromQuery = (url.searchParams.get('room') ?? '').trim();
+  if (roomFromQuery.length > 0) {
+    return roomFromQuery;
+  }
+
+  if (url.pathname === '/api/v1/trigger/callback' && request.method === 'POST') {
+    try {
+      const bodyText = await request.clone().text();
+      const parsed = JSON.parse(bodyText);
+      if (isObjectRecord(parsed)) {
+        const roomFromBody = (typeof parsed.room === 'string' ? parsed.room : '').trim();
+        if (roomFromBody.length > 0) {
+          return roomFromBody;
+        }
+        const ref = (typeof parsed.ref === 'string' ? parsed.ref : '').trim();
+        if (ref.length > 0) {
+          return deriveRoomFromIncomingRef(ref);
+        }
+      }
+    } catch {
+      // keep default room fallback
+    }
+  }
+
+  return DEFAULT_ROOM;
+}
+
 export class RelayRoom {
   private readonly state: DurableObjectStateLike;
   private readonly service: MemoryRelayService;
@@ -393,7 +437,7 @@ async function handleWorkerRequest(request: Request, env: RelayWorkerEnv): Promi
     return Response.json({ ok: false, error: 'not found' }, { status: 404 });
   }
 
-  const room = (url.searchParams.get('room') ?? DEFAULT_ROOM).trim();
+  const room = (await resolveRelayRouteRoom(url, request)).trim();
   if (!isValidRoomName(room)) {
     return invalidRoomResponse();
   }

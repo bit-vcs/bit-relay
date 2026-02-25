@@ -20,6 +20,7 @@ import { createRelayCacheAdapter } from './relay_cache_adapter.ts';
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
+export type IssueSourceOfTruth = 'last_write' | 'github' | 'bit';
 
 type JsonObject = { [key: string]: JsonValue };
 type KeyStatus = 'active' | 'revoked';
@@ -180,6 +181,8 @@ export interface IdentitySnapshot {
 
 export interface MemoryRelayOptions {
   authToken?: string;
+  peerAuthToken?: string;
+  issueSourceOfTruth?: IssueSourceOfTruth;
   maxMessagesPerRoom?: number;
   publishPayloadMaxBytes?: number;
   publishLimitPerWindow?: number;
@@ -237,6 +240,7 @@ const DEFAULT_WS_PING_INTERVAL_MS = 30_000;
 const DEFAULT_WS_IDLE_TIMEOUT_MS = 90_000;
 const DEFAULT_CACHE_EXCHANGE_MAX_HOPS = 3;
 const DEFAULT_CACHE_EXCHANGE_MAX_RECORDS = 10_000;
+const DEFAULT_ISSUE_SOURCE_OF_TRUTH: IssueSourceOfTruth = 'last_write';
 const MAX_GITHUB_WEBHOOK_DELIVERY_IDS = 10_000;
 const MAX_GITHUB_WEBHOOK_DLQ_ENTRIES = 10_000;
 const GITHUB_WEBHOOK_RETRY_BASE_SEC = 30;
@@ -1100,6 +1104,7 @@ function parseBoolOrDefault(raw: boolean | undefined, fallback: boolean): boolea
 
 export function createMemoryRelayService(options: MemoryRelayOptions = {}): MemoryRelayService {
   const authToken = normalizeAuthToken(options.authToken);
+  const peerAuthToken = normalizeAuthToken(options.peerAuthToken);
   const roomTokens = parseRoomTokens(options.roomTokens);
   const maxMessagesPerRoom = Math.max(
     1,
@@ -1165,6 +1170,10 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
   const cacheStore = options.cacheStore ?? null;
   const githubWebhookSecret = (options.githubWebhookSecret ?? '').trim();
   const fetchFn = options.fetchFn ?? globalThis.fetch;
+  const issueSourceOfTruth = options.issueSourceOfTruth === 'github' ||
+      options.issueSourceOfTruth === 'bit'
+    ? options.issueSourceOfTruth
+    : DEFAULT_ISSUE_SOURCE_OF_TRUTH;
   const cacheAdapter = createRelayCacheAdapter({
     cacheStore,
     isValidRoomName,
@@ -1173,6 +1182,7 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
     cachePersistMaxRetries: options.cachePersistMaxRetries,
     cachePersistRetryBaseDelayMs: options.cachePersistRetryBaseDelayMs,
     cachePersistRetryMaxDelayMs: options.cachePersistRetryMaxDelayMs,
+    issueSourceOfTruth,
   });
 
   const rooms = new Map<string, RoomState>();
@@ -1386,10 +1396,21 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
     return null;
   }
 
+  function checkPeerAuth(request: Request): Response | null {
+    if (peerAuthToken.length === 0) return null;
+    const presented = extractPresentedToken(request);
+    if (presented.length === 0 || !timingSafeEqual(presented, peerAuthToken)) {
+      return unauthorizedResponse();
+    }
+    return null;
+  }
+
   function handleCacheExchangeDiscovery(request: Request): Response {
     if (request.method !== 'GET') {
       return methodNotAllowedResponse();
     }
+    const peerAuthError = checkPeerAuth(request);
+    if (peerAuthError) return peerAuthError;
     return Response.json({
       ok: true,
       protocol: 'cache.exchange.v1',
@@ -1409,6 +1430,8 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
     if (request.method !== 'GET') {
       return methodNotAllowedResponse();
     }
+    const peerAuthError = checkPeerAuth(request);
+    if (peerAuthError) return peerAuthError;
     const after = normalizeAfter(url.searchParams.get('after'), 0);
     const limit = normalizeLimit(url.searchParams.get('limit'), 100);
     const peerRaw = (url.searchParams.get('peer') ?? '').trim();
@@ -1447,6 +1470,8 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
     if (request.method !== 'POST') {
       return methodNotAllowedResponse();
     }
+    const peerAuthError = checkPeerAuth(request);
+    if (peerAuthError) return peerAuthError;
 
     let parsed: unknown;
     try {
@@ -1569,6 +1594,8 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
     if (request.method !== 'GET') {
       return methodNotAllowedResponse();
     }
+    const peerAuthError = checkPeerAuth(request);
+    if (peerAuthError) return peerAuthError;
     const room = normalizeRoom(url.searchParams.get('room'));
     if (!isValidRoomName(room)) {
       return invalidRoomResponse();
@@ -1607,6 +1634,8 @@ export function createMemoryRelayService(options: MemoryRelayOptions = {}): Memo
     if (request.method !== 'GET') {
       return methodNotAllowedResponse();
     }
+    const peerAuthError = checkPeerAuth(request);
+    if (peerAuthError) return peerAuthError;
     const room = normalizeRoom(url.searchParams.get('room'));
     if (!isValidRoomName(room)) {
       return invalidRoomResponse();

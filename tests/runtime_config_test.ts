@@ -8,6 +8,8 @@ function envFrom(entries: Record<string, string | undefined>): (key: string) => 
 Deno.test('parseRelayRuntimeConfigFromEnv returns defaults', () => {
   const config = parseRelayRuntimeConfigFromEnv(envFrom({}));
   assertEquals(config.relay.authToken, undefined);
+  assertEquals(config.relay.peerAuthToken, undefined);
+  assertEquals(config.relay.issueSourceOfTruth, 'last_write');
   assertEquals(config.relay.requireSignatures, true);
   assertEquals(config.github.enabled, false);
   assertEquals(config.github.apiBaseUrl, 'https://api.github.com');
@@ -25,11 +27,16 @@ Deno.test('parseRelayRuntimeConfigFromEnv parses peers from csv env', () => {
     envFrom({
       RELAY_PEERS: 'https://relay-a.example, https://relay-b.example ,, ',
       RELAY_PEER_SYNC_INTERVAL_SEC: '45',
+      RELAY_PEER_AUTH_TOKEN: 'peer-shared-secret',
+      RELAY_ISSUE_SOURCE_OF_TRUTH: 'github',
     }),
   );
 
   assertEquals(config.peers.urls, ['https://relay-a.example', 'https://relay-b.example']);
   assertEquals(config.peers.syncIntervalSec, 45);
+  assertEquals(config.peers.authToken, 'peer-shared-secret');
+  assertEquals(config.relay.peerAuthToken, 'peer-shared-secret');
+  assertEquals(config.relay.issueSourceOfTruth, 'github');
 });
 
 Deno.test('parseRelayRuntimeConfigFromEnv applies RELAY_CONFIG_JSON override', () => {

@@ -23,6 +23,7 @@ export const TEST_HIERARCHY: Readonly<Record<TestLayer, ReadonlyArray<string>>> 
   ],
   integration: [
     'tests/admin_github_api_test.ts',
+    'tests/cloudflare_worker_test.ts',
     'tests/cache_exchange_api_test.ts',
     'tests/cache_issue_pull_test.ts',
     'tests/cache_issue_sync_test.ts',
