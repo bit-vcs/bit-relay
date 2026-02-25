@@ -43,6 +43,7 @@ export const TEST_HIERARCHY: Readonly<Record<TestLayer, ReadonlyArray<string>>> 
     'tests/e2e_content_addressed_sync_test.ts',
     'tests/e2e_git_cache_fallback_test.ts',
     'tests/e2e_github_admin_dispatch_test.ts',
+    'tests/e2e_github_signature_permissions_test.ts',
     'tests/e2e_issue_cache_fallback_test.ts',
     'tests/e2e_multi_node_test.ts',
     'tests/e2e_relay_scenarios_test.ts',

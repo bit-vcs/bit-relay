@@ -16,6 +16,7 @@ const EXPECTED_TEST_FILES = [
   'tests/e2e_content_addressed_sync_test.ts',
   'tests/e2e_git_cache_fallback_test.ts',
   'tests/e2e_github_admin_dispatch_test.ts',
+  'tests/e2e_github_signature_permissions_test.ts',
   'tests/e2e_issue_cache_fallback_test.ts',
   'tests/e2e_multi_node_test.ts',
   'tests/e2e_relay_scenarios_test.ts',
@@ -33,6 +34,7 @@ const EXPECTED_TEST_FILES = [
   'tests/relay_contract_test.ts',
   'tests/relay_handler_test.ts',
   'tests/relay_observability_test.ts',
+  'tests/repository_affinity_test.ts',
   'tests/review_test.ts',
   'tests/runtime_config_test.ts',
   'tests/trigger_callback_test.ts',
@@ -54,4 +56,3 @@ Deno.test('e2e layer contains only e2e test files', () => {
     assertEquals(path.startsWith('tests/e2e_'), true);
   }
 });
-
